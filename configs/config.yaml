@@ -1,0 +1,47 @@
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+pipeline:
+  max_clips: 10
+  min_confidence: 0.55
+  add_overlays: true
+  music_path: null          # set to a .mp3 path to add background music
+
+# ── Ingestion ─────────────────────────────────────────────────────────────────
+ingestion:
+  target_fps: 30
+  target_resolution: "1920x1080"
+  crf: 18                   # FFmpeg quality (lower = better quality, larger file)
+
+# ── Scene detection ───────────────────────────────────────────────────────────
+scene_detection:
+  threshold: 27.0           # ContentDetector threshold (lower = more cuts)
+  min_scene_len: 15         # Minimum scene length in frames
+
+# ── Audio analysis ────────────────────────────────────────────────────────────
+audio:
+  frame_length: 2048
+  hop_length: 512
+  top_db: 15.0
+  min_duration_s: 1.0
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  base_model: "MCG-NJU/videomae-base"
+  checkpoint_path: "models/checkpoints/videomae_nhl"
+  num_frames: 16
+  labels:
+    - goal
+    - save
+    - hit
+    - fight
+    - faceoff
+    - stoppage
+    - other
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  data_dir: "data/labeled"
+  output_dir: "models/checkpoints/videomae_nhl"
+  epochs: 10
+  batch_size: 4
+  learning_rate: 5.0e-5
+  use_wandb: true

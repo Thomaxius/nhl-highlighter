@@ -1,0 +1,36 @@
+# ─── Video Processing ────────────────────────────────────────────────────────
+opencv-python>=4.9.0
+moviepy>=1.0.3
+scenedetect[opencv]>=0.6.3
+
+# ─── Audio Analysis ──────────────────────────────────────────────────────────
+librosa>=0.10.2
+pydub>=0.25.1
+
+# ─── Deep Learning ───────────────────────────────────────────────────────────
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+pytorchvideo>=0.1.5
+transformers>=4.40.0          # VideoMAE, TimeSformer via HuggingFace
+accelerate>=0.29.0
+
+# ─── Data / Annotation ───────────────────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.2.0
+Pillow>=10.3.0
+scikit-learn>=1.4.0
+
+# ─── Experiment Tracking ─────────────────────────────────────────────────────
+wandb>=0.16.0
+
+# ─── CLI / Config ────────────────────────────────────────────────────────────
+click>=8.1.7
+pyyaml>=6.0.1
+tqdm>=4.66.2
+rich>=13.7.0
+
+# ─── Dev / Testing ───────────────────────────────────────────────────────────
+pytest>=8.1.0
+black>=24.3.0
+ruff>=0.3.5
