@@ -90,8 +90,8 @@ def train(
         per_device_eval_batch_size=batch_size,
         learning_rate=lr,
         weight_decay=0.01,
-        warmup_ratio=0.1,
-        evaluation_strategy="epoch",
+        warmup_steps=50,
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="f1",
@@ -99,7 +99,8 @@ def train(
         run_name="videomae-nhl-highlighter",
         logging_steps=10,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=2,
+        dataloader_num_workers=0,   # OpenCV is not fork-safe on macOS
+        dataloader_pin_memory=False,  # MPS does not support pin_memory
         remove_unused_columns=False,
     )
 

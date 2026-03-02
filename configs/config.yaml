@@ -30,11 +30,9 @@ model:
   num_frames: 16
   labels:
     - goal
-    - save
-    - hit
-    - fight
-    - faceoff
-    - stoppage
+    - celebration
+    - replay
+    - transition
     - other
 
 # ── Training ──────────────────────────────────────────────────────────────────

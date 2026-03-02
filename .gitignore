@@ -17,10 +17,37 @@ venv/
 env/
 ENV/
 
+# ── Config templates (keep these tracked) ────────────────────────────────────
+!configs/*.png
+
+# ── Video / audio / image files ───────────────────────────────────────────────
+*.mp4
+*.webm
+*.mov
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.aac
+*.png
+*.jpg
+*.jpeg
+
+# ── Model weights ─────────────────────────────────────────────────────────────
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.bin
+
 # Data — never commit raw video or models to git
 data/raw/
 data/processed/
 data/exports/
+data/labeled/
+data/found/
+data/transitions/
+goals/
 models/checkpoints/
 models/exported/
 

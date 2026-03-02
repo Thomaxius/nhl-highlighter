@@ -36,7 +36,7 @@ def ingest_clips(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    video_extensions = {".mp4", ".mov", ".mkv", ".avi"}
+    video_extensions = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
     clips = [p for p in source_dir.rglob("*") if p.suffix.lower() in video_extensions]
 
     if not clips:
@@ -47,9 +47,13 @@ def ingest_clips(
     for clip in clips:
         out_path = output_dir / (clip.stem + "_norm.mp4")
         if out_path.exists() and not overwrite:
-            logger.info("Skipping (already exists): %s", out_path.name)
-            processed.append(out_path)
-            continue
+            if out_path.stat().st_size > 10_000:  # skip only if file looks valid (>10KB)
+                logger.info("Skipping (already exists): %s", out_path.name)
+                processed.append(out_path)
+                continue
+            else:
+                logger.warning("Existing file looks broken (too small), re-encoding: %s", out_path.name)
+                out_path.unlink()
 
         logger.info("Normalising: %s → %s", clip.name, out_path.name)
         success = _ffmpeg_normalise(clip, out_path)
@@ -64,12 +68,13 @@ def _ffmpeg_normalise(src: Path, dst: Path) -> bool:
     cmd = [
         "ffmpeg", "-y",
         "-i", str(src),
-        "-vf", f"fps={TARGET_FPS},scale={TARGET_RESOLUTION}:force_original_aspect_ratio=decrease,pad={TARGET_RESOLUTION}:(ow-iw)/2:(oh-ih)/2",
+        "-vf", f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1:color=black,fps={TARGET_FPS}",
         "-c:v", TARGET_CODEC,
         "-preset", "fast",
         "-crf", "18",
         "-c:a", TARGET_AUDIO_CODEC,
         "-ar", str(TARGET_AUDIO_RATE),
+        "-movflags", "+faststart",
         str(dst),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -90,7 +95,7 @@ def copy_raw_clips(source_dir: str | Path, raw_dir: str | Path) -> list[Path]:
 
     copied: list[Path] = []
     for item in source_dir.iterdir():
-        if item.suffix.lower() in {".mp4", ".mov", ".mkv"}:
+        if item.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}:
             dest = raw_dir / item.name
             shutil.copy2(item, dest)
             copied.append(dest)

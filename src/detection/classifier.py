@@ -14,7 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Labels must match the order used during training.
-DEFAULT_LABELS = ["goal", "save", "hit", "fight", "faceoff", "stoppage", "other"]
+DEFAULT_LABELS = ["goal", "celebration", "replay", "other"]
 
 
 class HighlightClassifier:
@@ -31,15 +31,14 @@ class HighlightClassifier:
     def __init__(
         self,
         checkpoint_path: str | Path,
-        labels: list[str] = DEFAULT_LABELS,
+        labels: list[str] = None,
         device: Optional[str] = None,
         num_frames: int = 16,
     ) -> None:
-        self.labels = labels
         self.num_frames = num_frames
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model, self.processor = self._load_model(checkpoint_path)
-        logger.info("Classifier loaded on %s", self.device)
+        self.model, self.processor, self.labels = self._load_model(checkpoint_path, labels)
+        logger.info("Classifier loaded on %s with labels: %s", self.device, self.labels)
 
     # ------------------------------------------------------------------
     # Public API
@@ -56,7 +55,7 @@ class HighlightClassifier:
         if frames is None:
             return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
 
-        inputs = self.processor(videos=frames, return_tensors="pt").to(self.device)
+        inputs = self.processor(images=frames, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.model(**inputs)
@@ -83,7 +82,7 @@ class HighlightClassifier:
 
     def is_highlight(self, result: dict, min_confidence: float = 0.55) -> bool:
         """Return True if a segment is highlight-worthy."""
-        highlight_labels = {"goal", "save", "hit", "fight"}
+        highlight_labels = {"goal", "save", "hit", "fight", "celebration", "replay"}
         return (
             result["label"] in highlight_labels
             and result["confidence"] >= min_confidence
@@ -93,34 +92,48 @@ class HighlightClassifier:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _load_model(self, checkpoint_path: str | Path):
+    def _load_model(self, checkpoint_path: str | Path, labels: list[str] = None):
         from transformers import VideoMAEForVideoClassification, AutoProcessor
+        import json
 
         checkpoint_path = Path(checkpoint_path)
+
+        # Read labels from the saved checkpoint config first
+        config_file = checkpoint_path / "config.json"
+        if labels is None and config_file.exists():
+            with open(config_file) as f:
+                cfg = json.load(f)
+            id2label = cfg.get("id2label", {})
+            if id2label:
+                labels = [id2label[str(i)] for i in range(len(id2label))]
+                logger.info("Labels loaded from checkpoint config: %s", labels)
+
+        if labels is None:
+            labels = DEFAULT_LABELS
+            logger.warning("Could not read labels from checkpoint, using defaults: %s", labels)
 
         if checkpoint_path.exists():
             logger.info("Loading fine-tuned checkpoint: %s", checkpoint_path)
             model = VideoMAEForVideoClassification.from_pretrained(
                 str(checkpoint_path),
-                num_labels=len(self.labels),
+                num_labels=len(labels),
                 ignore_mismatched_sizes=True,
             )
             processor = AutoProcessor.from_pretrained(str(checkpoint_path))
         else:
-            # Fall back to base pretrained weights (zero-shot starting point)
             logger.warning(
                 "Checkpoint not found at %s — loading base VideoMAE weights.", checkpoint_path
             )
             model_id = "MCG-NJU/videomae-base"
             model = VideoMAEForVideoClassification.from_pretrained(
                 model_id,
-                num_labels=len(self.labels),
+                num_labels=len(labels),
                 ignore_mismatched_sizes=True,
             )
             processor = AutoProcessor.from_pretrained(model_id)
 
         model.to(self.device).eval()
-        return model, processor
+        return model, processor, labels
 
     def _load_frames(self, video_path: Path) -> Optional[list]:
         """Sample *num_frames* evenly spaced frames from the video."""
@@ -140,6 +153,7 @@ class HighlightClassifier:
             ret, frame = cap.read()
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = cv2.resize(frame, (224, 224))
                 frames.append(frame)
 
         cap.release()

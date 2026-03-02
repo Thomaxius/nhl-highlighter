@@ -64,13 +64,15 @@ class NHLSegmentDataset(Dataset):
 
         # Build sample list
         all_samples: list[tuple[Path, int]] = []
+        video_extensions = ["*.mp4", "*.webm", "*.mov", "*.mkv"]
         for label in self.labels:
             class_dir = self.root_dir / label
             if not class_dir.exists():
                 logger.warning("Label directory not found: %s", class_dir)
                 continue
-            for video_file in class_dir.glob("*.mp4"):
-                all_samples.append((video_file, self.label2idx[label]))
+            for ext in video_extensions:
+                for video_file in class_dir.glob(ext):
+                    all_samples.append((video_file, self.label2idx[label]))
 
         # Split
         rng = np.random.default_rng(seed)
@@ -123,6 +125,7 @@ class NHLSegmentDataset(Dataset):
             ret, frame = cap.read()
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = cv2.resize(frame, (224, 224))
                 frames.append(frame)
         cap.release()
 

@@ -22,6 +22,8 @@ from src.ingestion.ingest import ingest_clips
 from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
 from src.detection.classifier import HighlightClassifier
+from src.detection.banner_detector import BannerDetector
+from src.detection.game_clock_detector import GameClockDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -30,6 +32,76 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("pipeline")
+
+
+def _chain_goal_sequences(results: list[dict]) -> list[dict]:
+    """
+    After a banner-detected goal segment, look ahead and tag the immediately
+    following celebration and replay segments so they are included in the reel
+    in the correct order: goal → celebration → replay.
+
+    Stops chaining when:
+    - An `other` segment appears that is longer than 10s (not just a transition flash)
+    - A second goal banner is detected
+    - MAX_LOOKAHEAD segments have been checked
+    """
+    FOLLOW_LABELS = {"celebration", "replay"}
+    MAX_LOOKAHEAD = 10
+    MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
+
+    goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected")]
+
+    for goal_idx in goal_indices:
+        base_score = results[goal_idx]["score"]
+        order = 1
+        accumulated_gap_s = 0.0
+
+        for j in range(1, MAX_LOOKAHEAD + 1):
+            next_idx = goal_idx + j
+            if next_idx >= len(results):
+                break
+
+            seg = results[next_idx]
+
+            # Always stop at another goal
+            if seg.get("banner_detected"):
+                break
+
+            if seg.get("label") in FOLLOW_LABELS:
+                seg["chain_order"] = order
+                seg["chain_goal_idx"] = goal_idx
+                seg["score"] = base_score - (order * 0.01)
+                seg["confidence"] = max(seg.get("confidence", 0.0), 0.9)
+                logger.info(
+                    "  Chained %s (order %d, goal %d): %s",
+                    seg["label"], order, goal_idx, Path(seg["path"]).name,
+                )
+                order += 1
+                accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
+
+            elif seg.get("label") == "other":
+                # Measure this segment's duration — short ones are EA transitions, skip over them
+                duration = _get_clip_duration(seg["path"])
+                if duration <= 3.0:
+                    logger.info("  Skipping short transition (%.1fs): %s", duration, Path(seg["path"]).name)
+                    continue
+                accumulated_gap_s += duration
+                if accumulated_gap_s > MAX_GAP_S:
+                    logger.info("  Chain stopped — %.1fs gap exceeded 10s limit", accumulated_gap_s)
+                    break
+
+    return results
+
+
+def _get_clip_duration(video_path) -> float:
+    """Return the duration of a video clip in seconds."""
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    return frames / fps
+
 
 
 def run_pipeline(
@@ -76,10 +148,63 @@ def run_pipeline(
     classifier = HighlightClassifier(checkpoint_path=checkpoint)
     results = classifier.classify_segments(all_segments)
 
+    # ── Step 4b: Banner detection (GOAL! HUD overlay) ───────────────────────
+    # Auto-discovers all configs/goal_banner_template*.png — no path needed.
+    templates = sorted(Path("configs").glob("goal_banner_template*.png"))
+    if templates:
+        logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(templates))
+        detector = BannerDetector()  # auto-loads all matching templates
+        results = detector.score_segments(results)
+    else:
+        logger.info("Skipping banner detection (no templates found in configs/)")
+
+    # ── Step 4c: Banner is the ground truth — hard override ──────────────────
+    # If the GOAL! banner was detected, the segment IS a goal, period.
+    # No ML confidence threshold can override a pixel-level HUD match.
+    # Conversely, demote any 'goal' label that has no banner and low confidence.
+    logger.info("━━━  Step 4c: Banner-gating goal labels  ━━━")
+    demoted = 0
+    promoted = 0
+    for r in results:
+        if r.get("banner_detected"):
+            # Hard override regardless of what the classifier said
+            if r.get("label") != "goal":
+                logger.info(
+                    "  Banner override → goal: %s (was %s, conf=%.0f%%)",
+                    Path(r["path"]).name, r.get("label"), r.get("confidence", 0) * 100,
+                )
+                promoted += 1
+            r["label"] = "goal"
+            r["confidence"] = 1.0
+        elif r.get("label") == "goal" and r.get("confidence", 0) < 0.92:
+            r["label"] = "other"
+            demoted += 1
+    if promoted:
+        logger.info("  Promoted %d segment(s) to goal via banner detection.", promoted)
+    if demoted:
+        logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
+
+    # ── Step 4d: End-of-game clock detection ─────────────────────────────────
+    clock_template = Path("configs/game_end_template.png")
+    if clock_template.exists():
+        logger.info("━━━  Step 4d: End-of-game clock detection  ━━━")
+        clock_detector = GameClockDetector(template_path=clock_template)
+        results = clock_detector.score_segments(results)
+    else:
+        logger.info("Skipping clock detection (no template at %s)", clock_template)
+
+    # ── Step 4e: Chain goal → celebration → replay ───────────────────────────
+    logger.info("━━━  Step 4e: Chaining goal sequences  ━━━")
+    results = _chain_goal_sequences(results)
+
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")
     for r in results:
-        r["score"] = r["confidence"]
+        if "score" not in r:
+            r["score"] = r["confidence"]
+        logger.info("  %-45s  label=%-8s  conf=%.0f%%  banner=%s",
+                    Path(r["path"]).name, r["label"], r["confidence"] * 100,
+                    r.get("banner_detected", False))
 
     # Attach rough timing from filename index (real app would parse FFmpeg metadata)
     results = score_segments_by_audio(results, all_spikes)

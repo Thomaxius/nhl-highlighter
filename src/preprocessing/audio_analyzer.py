@@ -102,10 +102,15 @@ def score_segments_by_audio(
         Updated segments list with boosted scores.
     """
     for seg in segments:
+        seg_start = seg.get("start_s")
+        seg_end = seg.get("end_s")
+        if seg_start is None or seg_end is None:
+            # Segments without timing info can't be matched against audio spikes — skip
+            continue
         for spike in spikes:
             overlap = (
-                seg["start_s"] < spike["end_s"] + window_s
-                and seg["end_s"] > spike["start_s"] - window_s
+                seg_start < spike["end_s"] + window_s
+                and seg_end > spike["start_s"] - window_s
             )
             if overlap:
                 seg["score"] = seg.get("score", 0.0) + spike["energy"] * 10

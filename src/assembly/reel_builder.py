@@ -45,32 +45,88 @@ def build_reel(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Filter & rank
-    highlight_labels = {"goal", "save", "hit", "fight"}
+    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "replay"}
     filtered = [
         s for s in segments
         if s.get("label") in highlight_labels and s.get("confidence", 0) >= min_confidence
     ]
-    ranked = sorted(filtered, key=lambda s: s.get("score", s.get("confidence", 0)), reverse=True)
-    selected = ranked[:max_clips]
 
-    if not selected:
+    # Build goal sequences: each goal pulls its chained celebration + replay along with it.
+    # celebration and replay are ONLY included when chained to a banner-detected goal.
+    groups: list[list[dict]] = []
+    used_ids: set[int] = set()
+
+    # Collect game_end segments separately — they always go last, unscored
+    game_end_segs = [s for s in segments if s.get("game_end")]
+    for seg in game_end_segs:
+        used_ids.add(id(seg))
+
+    for i, seg in enumerate(segments):
+        if id(seg) in used_ids or seg not in filtered:
+            continue
+        if seg.get("banner_detected"):
+            # Start a goal group and collect chained follow-ups in order
+            group = [seg]
+            used_ids.add(id(seg))
+            for j in range(i + 1, min(i + 10, len(segments))):
+                follow = segments[j]
+                if follow.get("chain_goal_idx") == i:
+                    group.append(follow)
+                    used_ids.add(id(follow))
+            groups.append(group)
+        elif seg.get("label") in {"celebration", "replay"}:
+            # Never include celebration/replay unless chained to a goal — skip
+            used_ids.add(id(seg))
+            continue
+        else:
+            # Non-goal highlight (save, hit etc.) — standalone
+            groups.append([seg])
+            used_ids.add(id(seg))
+
+    # Keep groups in chronological order (original segment discovery order).
+    # Append game_end group(s) at the very end (use last-seen segment only)
+    if game_end_segs:
+        groups.append([game_end_segs[-1]])
+
+    if not groups:
         logger.warning("No highlight segments passed the filter — reel not created.")
         return output_path
 
-    logger.info("Building reel from %d clips …", len(selected))
+    # game_end clips are outside the max_clips limit — always include
+    highlight_groups = groups[:-len(game_end_segs)] if game_end_segs else groups
+    tail_groups = groups[-len(game_end_segs):] if game_end_segs else []
+    selected_groups = highlight_groups[:max_clips] + tail_groups
+
+    logger.info("Building reel from %d groups (%d highlights + %d game_end) …",
+                len(selected_groups), len(highlight_groups[:max_clips]), len(tail_groups))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
-        # Step 1: Optionally add text overlays to each clip
+        # Step 1: Process each group — goal sequences become ONE rolling clip
         processed_clips: list[Path] = []
-        for i, seg in enumerate(selected):
-            src = Path(seg["path"])
-            dst = tmp / f"clip_{i:03d}.mp4"
-            if add_overlays:
-                _burn_overlay(src, dst, label=seg["label"], confidence=seg["confidence"])
+        for group_idx, group in enumerate(selected_groups):
+            lead = group[0]
+
+            if lead.get("banner_detected") and len(group) > 1:
+                # ── Merge goal → celebration → replay into a single continuous clip ──
+                merged = tmp / f"group_{group_idx:03d}_merged.mp4"
+                _merge_goal_sequence(group, merged, tmp)
+                src = merged
             else:
-                dst = src  # Use original
+                # ── Standalone clip (solo goal, save, hit, etc.) ──
+                src = Path(lead["path"])
+                if "trim_start_s" in lead and "trim_end_s" in lead:
+                    trimmed = tmp / f"trimmed_{group_idx:03d}.mp4"
+                    _ffmpeg_trim(src, trimmed, lead["trim_start_s"], lead["trim_end_s"])
+                    src = trimmed
+
+            dst = tmp / f"clip_{group_idx:03d}.mp4"
+            if add_overlays:
+                _burn_overlay(src, dst, label=lead["label"], confidence=lead["confidence"])
+            else:
+                import shutil as _shutil
+                _shutil.copy2(src, dst)
             processed_clips.append(dst)
 
         # Step 2: Add fade-in / fade-out to each clip
@@ -102,6 +158,88 @@ def build_reel(
 # ─────────────────────────────────────────────────────────────────────────────
 # Private helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _merge_goal_sequence(group: list[dict], output: Path, tmp: Path) -> None:
+    """
+    Concatenate goal (trimmed from banner window start) + celebration + replay
+    into a single seamless rolling clip, re-encoding each part to uniform
+    codec / resolution before the concat.
+    """
+    import shutil
+
+    parts: list[Path] = []
+    for k, seg in enumerate(group):
+        src = Path(seg["path"])
+        if k == 0 and "trim_start_s" in seg:
+            # Goal clip: trim from the pre-goal window start to end-of-file
+            # (let it roll naturally into the goal moment and beyond)
+            part = tmp / f"seq_raw_{k}_{output.stem}.mp4"
+            _ffmpeg_trim_start(src, part, seg["trim_start_s"])
+            parts.append(part)
+        else:
+            parts.append(src)
+
+    if len(parts) == 1:
+        shutil.copy2(parts[0], output)
+        return
+
+    # Re-encode each part to uniform 1080p / aac so stream-copy concat works
+    reencoded: list[Path] = []
+    for k, p in enumerate(parts):
+        enc = tmp / f"seq_enc_{k}_{output.stem}.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-i", str(p),
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "aac", "-ar", "44100",
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1",
+            str(enc),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("Re-encode failed for part %d, using original.", k)
+            shutil.copy2(p, enc)
+        reencoded.append(enc)
+
+    concat_list = tmp / f"seq_concat_{output.stem}.txt"
+    concat_list.write_text("\n".join(f"file '{str(p)}'" for p in reencoded))
+    _ffmpeg_concat(concat_list, output)
+
+
+def _ffmpeg_trim_start(src: Path, dst: Path, start_s: float) -> None:
+    """Trim a clip from start_s to end-of-file (no encode — seek then copy)."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_s),
+        "-i", str(src),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("Trim-start failed for %s, using original.", src.name)
+        import shutil
+        shutil.copy2(src, dst)
+
+
+def _ffmpeg_trim(src: Path, dst: Path, start_s: float, end_s: float) -> None:
+    """Trim a clip to [start_s, end_s] using FFmpeg stream copy (fast, no re-encode)."""
+    duration = end_s - start_s
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_s),
+        "-i", str(src),
+        "-t", str(duration),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("Trim failed for %s, using original.", src.name)
+        import shutil
+        shutil.copy2(src, dst)
+
 
 def _burn_overlay(src: Path, dst: Path, label: str, confidence: float) -> None:
     overlay_text = f"{label.upper()} ({confidence:.0%})"
