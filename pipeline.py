@@ -23,7 +23,6 @@ from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
 from src.detection.classifier import HighlightClassifier
 from src.detection.banner_detector import BannerDetector
-from src.detection.game_clock_detector import GameClockDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -177,21 +176,16 @@ def run_pipeline(
             r["label"] = "goal"
             r["confidence"] = 1.0
         elif r.get("label") == "goal" and r.get("confidence", 0) < 0.92:
+            logger.info(
+                "  Demoted → other: %s (conf=%.0f%%, no banner)",
+                Path(r["path"]).name, r.get("confidence", 0) * 100,
+            )
             r["label"] = "other"
             demoted += 1
     if promoted:
         logger.info("  Promoted %d segment(s) to goal via banner detection.", promoted)
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
-
-    # ── Step 4d: End-of-game clock detection ─────────────────────────────────
-    clock_template = Path("configs/game_end_template.png")
-    if clock_template.exists():
-        logger.info("━━━  Step 4d: End-of-game clock detection  ━━━")
-        clock_detector = GameClockDetector(template_path=clock_template)
-        results = clock_detector.score_segments(results)
-    else:
-        logger.info("Skipping clock detection (no template at %s)", clock_template)
 
     # ── Step 4e: Chain goal → celebration → replay ───────────────────────────
     logger.info("━━━  Step 4e: Chaining goal sequences  ━━━")
