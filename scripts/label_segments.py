@@ -12,7 +12,8 @@ Usage
 Controls
 --------
     g → goal        c → celebration  r → replay
-    t → transition  o → other
+    s → scoring_chance               t → transition
+    o → other
     SPACE → skip    q → quit
 """
 
@@ -26,6 +27,7 @@ KEYMAP = {
     "g": "goal",
     "c": "celebration",
     "r": "replay",
+    "s": "scoring_chance",
     "t": "transition",
     "o": "other",
 }

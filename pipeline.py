@@ -23,6 +23,7 @@ from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
 from src.detection.classifier import HighlightClassifier
 from src.detection.banner_detector import BannerDetector
+from src.detection.score_detector import ScoreDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -187,8 +188,13 @@ def run_pipeline(
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
 
-    # ── Step 4e: Chain goal → celebration → replay ───────────────────────────
-    logger.info("━━━  Step 4e: Chaining goal sequences  ━━━")
+    # ── Step 4e: Score change detection (OCR) ────────────────────────────────
+    logger.info("━━━  Step 4e: Score change detection  ━━━")
+    score_detector = ScoreDetector(sample_frames=6)
+    results = score_detector.score_segments(results)
+
+    # ── Step 4f: Chain goal → celebration → replay ───────────────────────────
+    logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
     results = _chain_goal_sequences(results)
 
     # ── Step 5: Score with audio boosts ──────────────────────────────────────

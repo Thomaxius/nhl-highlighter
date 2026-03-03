@@ -7,6 +7,9 @@ scenedetect[opencv]>=0.6.3
 librosa>=0.10.2
 pydub>=0.25.1
 
+# ─── OCR (score detection) ───────────────────────────────────────────────────
+pytesseract>=0.3.10           # requires: brew install tesseract
+
 # ─── Deep Learning ───────────────────────────────────────────────────────────
 torch>=2.2.0
 torchvision>=0.17.0
