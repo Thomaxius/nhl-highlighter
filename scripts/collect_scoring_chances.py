@@ -66,32 +66,41 @@ def extract_window(
     prev_seg: Path | None,
     curr_seg: Path,
     output_path: Path,
+    shot_time: float = 0.0,
     pre_shot_s: float = 6.0,
     post_shot_s: float = 2.0,
 ) -> bool:
     """
-    Concatenate [last pre_shot_s of prev_seg] + [first post_shot_s of curr_seg]
-    into output_path using ffmpeg. Returns True on success.
-    If prev_seg is None, just copies the first post_shot_s of curr_seg.
+    Extract a clip centred on *shot_time* (seconds into curr_seg):
+
+        [shot_time - pre_shot_s  ..  shot_time + post_shot_s]
+
+    If the pre-window extends before the start of curr_seg, the deficit is
+    drawn from the tail of prev_seg.  Returns True on success.
     """
     with tempfile.TemporaryDirectory() as tmp:
         parts: list[Path] = []
 
-        if prev_seg is not None:
-            dur = get_duration(prev_seg)
-            start = max(0.0, dur - pre_shot_s)
+        # How much of the pre-window lies before curr_seg starts?
+        curr_pre_start = max(0.0, shot_time - pre_shot_s)
+        pre_shortage   = max(0.0, pre_shot_s - shot_time)  # seconds needed from prev_seg
+
+        if prev_seg is not None and pre_shortage > 0:
+            prev_dur = get_duration(prev_seg)
+            start = max(0.0, prev_dur - pre_shortage)
             part_a = Path(tmp) / "part_a.mp4"
             r = subprocess.run([
                 "ffmpeg", "-y", "-ss", str(start), "-i", str(prev_seg),
-                "-c", "copy", str(part_a),
+                "-t", str(pre_shortage), "-c", "copy", str(part_a),
             ], capture_output=True)
             if r.returncode == 0:
                 parts.append(part_a)
 
         part_b = Path(tmp) / "part_b.mp4"
+        clip_duration = (shot_time + post_shot_s) - curr_pre_start
         r = subprocess.run([
-            "ffmpeg", "-y", "-i", str(curr_seg),
-            "-t", str(post_shot_s), "-c", "copy", str(part_b),
+            "ffmpeg", "-y", "-ss", str(curr_pre_start), "-i", str(curr_seg),
+            "-t", str(clip_duration), "-c", "copy", str(part_b),
         ], capture_output=True)
         if r.returncode == 0:
             parts.append(part_b)
@@ -100,8 +109,7 @@ def extract_window(
             return False
 
         if len(parts) == 1:
-            import shutil
-            shutil.copy2(parts[0], output_path)
+            shutil.copy2(str(parts[0]), str(output_path))
             return True
 
         # Write concat list file
@@ -171,20 +179,29 @@ def collect(
             dest = dest_dir / f"{seg.stem}_goal{seg.suffix}"
             logger.info("  GOAL    → %s  (score: %s-%s)", seg.name, result["away"], result["home"])
             if not dry_run:
-                import shutil
                 shutil.copy2(seg, dest)
 
         elif result["sog_changed"]:
-            n = result.get("sog_change_count", 1)
-            shots_found += 1
-            dest = output_dir / f"{seg.stem}_scoring_chance{seg.suffix}"
-            logger.info(
-                "  SHOT x%d → %s  (SOG: %s-%s)",
-                n, seg.name, result.get("sog_away"), result.get("sog_home"),
-            )
-            if not dry_run:
-                import shutil
-                shutil.copy2(seg, dest)
+            shot_timestamps = result.get("shot_timestamps") or [0.0]
+            for shot_i, shot_time in enumerate(shot_timestamps):
+                shots_found += 1
+                clip_label = f"_shot{shot_i + 1:02d}" if len(shot_timestamps) > 1 else "_scoring_chance"
+                dest = output_dir / f"{seg.stem}{clip_label}{seg.suffix}"
+                logger.info(
+                    "  SHOT %d/%d → %s  @t=%.1fs  (SOG: %s-%s)",
+                    shot_i + 1, len(shot_timestamps), seg.name, shot_time,
+                    result.get("sog_away"), result.get("sog_home"),
+                )
+                if not dry_run:
+                    ok = extract_window(
+                        prev_seg, seg, dest,
+                        shot_time=shot_time,
+                        pre_shot_s=pre_shot_s,
+                        post_shot_s=post_shot_s,
+                    )
+                    if not ok:
+                        logger.warning("    ffmpeg failed for %s — falling back to full copy", dest.name)
+                        shutil.copy2(seg, dest)
 
         prev_seg = seg
 

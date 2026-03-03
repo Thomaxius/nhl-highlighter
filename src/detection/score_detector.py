@@ -31,8 +31,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import logging
+import os
 import re
 import numpy as np
+
+# Disable FFmpeg hardware-accelerated video decoding (VideoToolbox on macOS).
+# Without this, cv2.VideoCapture deadlocks when called after PyTorch/MPS has
+# already claimed the GPU — a common hang in the pipeline's Step 4e.
+# Must be set before the first VideoCapture open, so module-level is correct.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;none")
+
 import cv2
 
 logger = logging.getLogger(__name__)
@@ -115,7 +123,7 @@ class ScoreDetector:
             }
         """
         video_path = Path(video_path)
-        cap = cv2.VideoCapture(str(video_path))
+        cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         total = max(total, 1)
 
@@ -136,6 +144,8 @@ class ScoreDetector:
         run_sog_away: Optional[int] = self._last_sog_away if self._last_hud_visible else None
 
         sog_change_count = 0
+        shot_timestamps: list[float] = []
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -159,6 +169,7 @@ class ScoreDetector:
                     if (0 < home_diff <= 2 or 0 < away_diff <= 2) and home_diff >= 0 and away_diff >= 0:
                         count = (home_diff if 0 < home_diff <= 2 else 0) + (away_diff if 0 < away_diff <= 2 else 0)
                         sog_change_count += count
+                        shot_timestamps.extend([int(idx) / fps] * count)
                         logger.debug(
                             "Intra-segment SOG bump in %s @ frame %d: %s/%s → %s/%s (+%d)",
                             video_path.name, idx, run_sog_away, run_sog_home, sog_away, sog_home, count,
@@ -222,9 +233,10 @@ class ScoreDetector:
             "sog_away": best_sog_away,
             "score_changed": score_changed,
             "sog_changed": sog_changed,
-            "sog_change_count": sog_change_count,
-            "hud_visible": hud_visible,
-            "raw_text": raw_text,
+            "sog_change_count":  sog_change_count,
+            "shot_timestamps":   shot_timestamps,
+            "hud_visible":       hud_visible,
+            "raw_text":          raw_text,
         }
 
     def score_segments(self, segments: list[dict]) -> list[dict]:
@@ -282,7 +294,7 @@ class ScoreDetector:
         Save the scoreboard ROI crop to disk for visual inspection.
         Useful for tuning ROI constants.
         """
-        cap = cv2.VideoCapture(str(video_path))
+        cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         cap.release()
@@ -338,13 +350,28 @@ class ScoreDetector:
         h, w = binary.shape
         mid = h // 2
 
+        OCR_TIMEOUT = 5  # seconds per tesseract call; prevents hangs on bad frames
+
+        def _ocr(crop: np.ndarray, config: str) -> str:
+            """Run tesseract with a timeout; return '' on empty crop or timeout."""
+            if crop is None or crop.size == 0 or 0 in crop.shape:
+                return ""
+            try:
+                return pytesseract.image_to_string(crop, config=config, timeout=OCR_TIMEOUT).strip()
+            except RuntimeError:
+                logger.debug("Tesseract timed out (>%ds) on a crop — skipping frame", OCR_TIMEOUT)
+                return ""
+            except Exception as exc:
+                logger.debug("Tesseract error on crop: %s", exc)
+                return ""
+
         # ── Score sub-crop (x: 15-65%) ─────────────────────────────────────
         sx1, sx2 = int(0.15 * w), int(0.65 * w)
         score_top = binary[:mid,  sx1:sx2]
         score_bot = binary[mid:,  sx1:sx2]
         cfg_line  = "--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ "
-        away_score_text = pytesseract.image_to_string(score_top, config=cfg_line).strip()
-        home_score_text = pytesseract.image_to_string(score_bot, config=cfg_line).strip()
+        away_score_text = _ocr(score_top, cfg_line)
+        home_score_text = _ocr(score_bot, cfg_line)
 
         # ── SOG sub-crop (x: 65-78%) — digit rows only, skip middle label ──
         gx1, gx2 = int(0.65 * w), int(0.78 * w)
@@ -352,14 +379,14 @@ class ScoreDetector:
         sog_away_crop = binary[:int(0.40 * h), gx1:gx2]
         sog_home_crop = binary[int(0.60 * h):, gx1:gx2]
         cfg_char = "--psm 10 -c tessedit_char_whitelist=0123456789"
-        away_sog_text = pytesseract.image_to_string(sog_away_crop, config=cfg_char).strip()
-        home_sog_text = pytesseract.image_to_string(sog_home_crop, config=cfg_char).strip()
+        away_sog_text = _ocr(sog_away_crop, cfg_char)
+        home_sog_text = _ocr(sog_home_crop, cfg_char)
 
         # ── Clock sub-crop (x: 80-100%, top half) ──────────────────────────
         cx1 = int(0.80 * w)
         clock_crop = binary[:mid, cx1:]
         cfg_clock = "--psm 7 -c tessedit_char_whitelist=0123456789:"
-        clock_text = pytesseract.image_to_string(clock_crop, config=cfg_clock).strip()
+        clock_text = _ocr(clock_crop, cfg_clock)
 
         # Pack into two lines that _parse_scores can split on
         # Format: "SCORE_TEXT|SOG_TEXT\nSCORE_TEXT|SOG_TEXT"
