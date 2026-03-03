@@ -223,7 +223,11 @@ def run_pipeline(
 
 def main():
     p = argparse.ArgumentParser(description="NHL 25 Highlight Reel Generator")
-    p.add_argument("--input", required=True, help="Directory of raw .mp4 clips from PS5")
+
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--file",   metavar="FILE",   help="Single raw .mp4 to process")
+    src.add_argument("--folder", metavar="FOLDER", help="Folder of raw .mp4 clips (default: data/raw)")
+
     p.add_argument("--output", default="data/exports/reel.mp4", help="Output reel path")
     p.add_argument("--checkpoint", default="models/checkpoints/videomae_nhl")
     p.add_argument("--music", default=None, help="Optional background music file")
@@ -231,8 +235,19 @@ def main():
     p.add_argument("--min_confidence", type=float, default=0.55)
     args = p.parse_args()
 
+    if args.file:
+        # Wrap the single file in a temp dir so the pipeline's ingest step
+        # sees it as a one-file folder without touching the original.
+        import tempfile, os
+        file_path = Path(args.file).resolve()
+        tmp = tempfile.mkdtemp(prefix="pipeline_single_")
+        os.link(file_path, Path(tmp) / file_path.name)   # hardlink — instant, no extra disk
+        input_dir = tmp
+    else:
+        input_dir = args.folder or "data/raw"
+
     run_pipeline(
-        input_dir=args.input,
+        input_dir=input_dir,
         output_path=args.output,
         checkpoint=args.checkpoint,
         music_path=args.music,
