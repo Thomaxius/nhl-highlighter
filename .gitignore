@@ -51,6 +51,9 @@ goals/
 models/checkpoints/
 models/exported/
 
+# But always keep placeholder files that preserve folder structure
+!**/.gitkeep
+
 # Notebooks checkpoints
 .ipynb_checkpoints/
 
