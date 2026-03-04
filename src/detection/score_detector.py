@@ -252,8 +252,12 @@ class ScoreDetector:
 
         Modifies segments in-place. Returns the updated list.
         """
+        hud_visible_count = 0
+        sog_shots_total = 0
+        score_changes_total = 0
+
         for seg in segments:
-            # Use fast mode (3 frames) for segments already confirmed as
+            # Use fast mode (6 frames) for segments already confirmed as
             # non-highlights — we only need enough to keep SOG state current.
             interesting = seg.get("banner_detected") or seg.get("label") not in ("other", None)
             result = self.detect_in_segment(seg["path"], fast=not interesting)
@@ -264,21 +268,33 @@ class ScoreDetector:
             seg["score_changed"] = result["score_changed"]
             seg["sog_changed"] = result["sog_changed"]
 
+            if result["hud_visible"]:
+                hud_visible_count += 1
+
             if result["score_changed"]:
+                score_changes_total += 1
                 # Boost score/confidence as a secondary signal — do NOT set
                 # label="goal" here. Banner detection is the ground truth.
                 logger.info(
-                    "Score change aid signal: %s (current label=%s)",
+                    "  Score change: %s (label=%s)",
                     Path(seg["path"]).name, seg.get("label"),
                 )
                 seg["confidence"] = max(seg.get("confidence", 0.0), 0.85)
                 seg["score"] = seg.get("score", 0.0) + 0.8
 
             elif result["sog_changed"]:
-                logger.debug(
-                    "SOG change (shot on net): %s", Path(seg["path"]).name
+                n = result.get("sog_change_count", 1)
+                sog_shots_total += n
+                logger.info(
+                    "  SOG shot x%d: %s  (sog=%s/%s)",
+                    n, Path(seg["path"]).name,
+                    result.get("sog_away"), result.get("sog_home"),
                 )
 
+        logger.info(
+            "Score detector: %d/%d segments with HUD visible, %d shot(s), %d score change(s)",
+            hud_visible_count, len(segments), sog_shots_total, score_changes_total,
+        )
         return segments
 
     def reset(self) -> None:
