@@ -31,6 +31,44 @@ from src.training.dataset import NHLSegmentDataset
 logger = logging.getLogger(__name__)
 
 
+def compute_class_weights(dataset: "NHLSegmentDataset") -> torch.Tensor:
+    """Compute inverse-frequency class weights from a dataset's sample list."""
+    from collections import Counter
+    counts = Counter(label_idx for _, label_idx in dataset.samples)
+    num_classes = len(dataset.labels)
+    total = len(dataset.samples)
+    weights = []
+    for i in range(num_classes):
+        count = counts.get(i, 1)  # avoid division by zero
+        weights.append(total / (num_classes * count))
+    weight_tensor = torch.tensor(weights, dtype=torch.float)
+    for label, i in dataset.label2idx.items():
+        logger.info("  Class weight  %-20s  n=%-4d  w=%.3f", label, counts.get(i, 0), weights[i])
+    return weight_tensor
+
+
+class WeightedTrainer(Trainer):
+    """HuggingFace Trainer with inverse-frequency class weighting."""
+
+    def __init__(self, *args, class_weights: torch.Tensor = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        if self.class_weights is not None:
+            weight = self.class_weights.to(logits.device)
+        else:
+            weight = None
+
+        loss_fn = torch.nn.CrossEntropyLoss(weight=weight)
+        loss = loss_fn(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+
 def compute_metrics(eval_pred):
     from sklearn.metrics import accuracy_score, f1_score
 
@@ -104,14 +142,19 @@ def train(
         remove_unused_columns=False,
     )
 
+    # ── Class weights ────────────────────────────────────────────────────────
+    logger.info("Computing class weights from training set...")
+    class_weights = compute_class_weights(train_dataset)
+
     # ── Trainer ──────────────────────────────────────────────────────────────
-    trainer = Trainer(
+    trainer = WeightedTrainer(
         model=model,
         args=args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
         data_collator=collate_fn,
+        class_weights=class_weights,
     )
 
     trainer.train()
