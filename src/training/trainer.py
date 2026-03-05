@@ -32,15 +32,22 @@ logger = logging.getLogger(__name__)
 
 
 def compute_class_weights(dataset: "NHLSegmentDataset") -> torch.Tensor:
-    """Compute inverse-frequency class weights from a dataset's sample list."""
+    """Compute inverse-frequency class weights from a dataset's sample list.
+
+    Classes with 0 samples in this split are assigned weight 0.0 so they
+    don't pollute the loss (they can't appear in a batch anyway).
+    """
     from collections import Counter
     counts = Counter(label_idx for _, label_idx in dataset.samples)
     num_classes = len(dataset.labels)
     total = len(dataset.samples)
     weights = []
     for i in range(num_classes):
-        count = counts.get(i, 1)  # avoid division by zero
-        weights.append(total / (num_classes * count))
+        count = counts.get(i, 0)
+        if count == 0:
+            weights.append(0.0)  # class absent from this split — ignore
+        else:
+            weights.append(total / (num_classes * count))
     weight_tensor = torch.tensor(weights, dtype=torch.float)
     for label, i in dataset.label2idx.items():
         logger.info("  Class weight  %-20s  n=%-4d  w=%.3f", label, counts.get(i, 0), weights[i])
@@ -93,7 +100,7 @@ def train(
     base_model: str = "MCG-NJU/videomae-base",
     num_frames: int = 16,
     epochs: int = 10,
-    batch_size: int = 4,
+    batch_size: int = 8,
     lr: float = 5e-5,
     use_wandb: bool = True,
 ) -> None:
@@ -137,8 +144,9 @@ def train(
         run_name="videomae-nhl-highlighter",
         logging_steps=10,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=0,   # OpenCV is not fork-safe on macOS
-        dataloader_pin_memory=False,  # MPS does not support pin_memory
+        dataloader_num_workers=2,        # 2 workers keeps RAM pressure low on 16 GB
+        dataloader_pin_memory=torch.cuda.is_available(),
+        dataloader_persistent_workers=True,
         remove_unused_columns=False,
     )
 
@@ -172,7 +180,7 @@ def _parse_args():
     p.add_argument("--base_model", default="MCG-NJU/videomae-base")
     p.add_argument("--num_frames", type=int, default=16)
     p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--no_wandb", action="store_true")
     return p.parse_args()
