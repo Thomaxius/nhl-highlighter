@@ -97,14 +97,13 @@ def build_reel(
         groups.insert(0, intro_segs)
 
     if game_end_segs:
-        # Sort by path name to preserve chronological order, exclude any segs
-        # that are already included as goal/celebration/replay groups.
+        # Sort by path name to preserve chronological order.
+        # (game_end_segs were already added to used_ids above to keep them
+        # out of the goal-chain loop — no need to filter again here.)
         game_end_segs_ordered = sorted(
-            [s for s in game_end_segs if id(s) not in used_ids],
+            game_end_segs,
             key=lambda s: str(s["path"]),
         )
-        for s in game_end_segs_ordered:
-            used_ids.add(id(s))
         if game_end_segs_ordered:
             groups.append(game_end_segs_ordered)
 
@@ -141,37 +140,63 @@ def build_reel(
             elif lead.get("intro"):
                 # ── Concat all intro segments, then trim to VS+6s … faceoff+7s ──
                 concat_intro = tmp / f"group_{group_idx:03d}_intro_raw.mp4"
-                paths = [Path(s["path"]) for s in group]
+                paths = [Path(s["path"]).resolve() for s in group]
                 concat_txt = tmp / f"intro_list_{group_idx:03d}.txt"
                 concat_txt.write_text("\n".join(f"file '{p}'" for p in paths))
-                subprocess.run(
+                r_concat = subprocess.run(
                     ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                      "-i", str(concat_txt), "-c", "copy", str(concat_intro)],
-                    capture_output=True,
+                    capture_output=True, text=True,
                 )
-                trim_start = lead.get("intro_clip_start_s", 0.0)
-                trim_end   = lead.get("intro_clip_end_s")
-                if trim_end is not None:
-                    trimmed_intro = tmp / f"group_{group_idx:03d}_intro.mp4"
-                    _ffmpeg_trim(concat_intro, trimmed_intro, trim_start, trim_end)
-                    src = trimmed_intro
+                if r_concat.returncode != 0 or not concat_intro.exists():
+                    logger.warning(
+                        "Intro concat failed (rc=%d): %s",
+                        r_concat.returncode, r_concat.stderr[-300:],
+                    )
+                    src = Path(lead["path"])  # fallback: just the first segment
                 else:
-                    src = concat_intro
-            elif lead.get("game_end") and len(group) > 1:
-                # ── Concatenate all game-end segments into one final clip ──
-                merged = tmp / f"group_{group_idx:03d}_gameend.mp4"
-                paths  = [Path(s["path"]) for s in group]
-                concat_txt = tmp / f"gameend_list_{group_idx:03d}.txt"
-                concat_txt.write_text("\n".join(f"file '{p}'" for p in paths))
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                     "-i", str(concat_txt), "-c", "copy", str(merged)],
-                    capture_output=True,
+                    trim_start = lead.get("intro_clip_start_s", 0.0)
+                    trim_end   = lead.get("intro_clip_end_s")
+                    if trim_end is not None:
+                        trimmed_intro = tmp / f"group_{group_idx:03d}_intro.mp4"
+                        _ffmpeg_trim(concat_intro, trimmed_intro, trim_start, trim_end)
+                        src = trimmed_intro if trimmed_intro.exists() else concat_intro
+                    else:
+                        src = concat_intro
+            elif lead.get("game_end"):
+                # ── Concatenate all game-end segments then trim 20s post-event ──
+                if len(group) > 1:
+                    raw_gameend = tmp / f"group_{group_idx:03d}_gameend_raw.mp4"
+                    paths       = [Path(s["path"]).resolve() for s in group]
+                    concat_txt  = tmp / f"gameend_list_{group_idx:03d}.txt"
+                    concat_txt.write_text("\n".join(f"file '{p}'" for p in paths))
+                    r = subprocess.run(
+                        ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                         "-i", str(concat_txt), "-c", "copy", str(raw_gameend)],
+                        capture_output=True, text=True,
+                    )
+                    if r.returncode != 0 or not raw_gameend.exists():
+                        logger.warning(
+                            "game_end concat failed (rc=%d): %s",
+                            r.returncode, r.stderr[-300:],
+                        )
+                        raw_gameend = Path(lead["path"]).resolve()  # fallback
+                    base = raw_gameend
+                else:
+                    base = Path(lead["path"]).resolve()
+                trim_start = lead.get("game_end_trim_start_s", 0.0)
+                trim_end   = lead.get("game_end_trim_end_s")
+                logger.info(
+                    "game_end clip: %d segment(s), trim=[%.1fs, %.1fs] (lead=%s)",
+                    len(group), trim_start, trim_end if trim_end is not None else -1,
+                    Path(lead["path"]).name,
                 )
-                if r.returncode != 0:
-                    logger.warning("game_end concat failed: %s", r.stderr[-200:])
-                    merged = Path(lead["path"])  # fallback to first segment
-                src = merged
+                if trim_end is not None:
+                    trimmed_ge = tmp / f"group_{group_idx:03d}_gameend.mp4"
+                    _ffmpeg_trim(base, trimmed_ge, trim_start, trim_end)
+                    src = trimmed_ge if trimmed_ge.exists() else base
+                else:
+                    src = base
             else:
                 # ── Standalone clip (solo goal, save, hit, etc.) ──
                 src = Path(lead["path"])
@@ -277,8 +302,11 @@ def _ffmpeg_trim_start(src: Path, dst: Path, start_s: float) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.warning("Trim-start failed for %s, using original.", src.name)
-        import shutil
-        shutil.copy2(src, dst)
+        if src.exists():
+            import shutil
+            shutil.copy2(src, dst)
+        else:
+            logger.error("Trim-start fallback failed — source does not exist: %s", src)
 
 
 def _ffmpeg_trim(src: Path, dst: Path, start_s: float, end_s: float) -> None:
@@ -296,8 +324,11 @@ def _ffmpeg_trim(src: Path, dst: Path, start_s: float, end_s: float) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.warning("Trim failed for %s, using original.", src.name)
-        import shutil
-        shutil.copy2(src, dst)
+        if src.exists():
+            import shutil
+            shutil.copy2(src, dst)
+        else:
+            logger.error("Trim fallback failed — source does not exist: %s", src)
 
 
 def _burn_overlay(src: Path, dst: Path, label: str, confidence: float) -> None:

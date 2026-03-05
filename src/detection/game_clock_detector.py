@@ -43,7 +43,8 @@ ROI_W = 0.215  # width      (fraction of frame width)
 ROI_H = 0.074  # height     (fraction of frame height) — tall enough for clock + period label (~80px @ 1080p)
 
 # Template match threshold below which we skip OCR entirely (speed gate).
-MIN_TEMPLATE_CONF = 0.45
+MIN_TEMPLATE_CONF        = 0.45  # gate to allow OCR (applies to all events)
+MIN_GAME_END_CONF        = 0.70  # stricter gate specifically for game_end events
 
 
 class GameClockDetector:
@@ -124,28 +125,53 @@ class GameClockDetector:
         n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         step    = max(1, int(fps * interval_s))
-        indices = range(0, n_total, step)
+        indices = list(range(0, n_total, step))
         logger.info(
             "GameClockDetector: scanning %s — %d samples at %.0fs intervals",
             video_path.name, len(indices), interval_s,
         )
 
         raw_events: list[dict] = []
+
+        # ── Pass 1: scan BACKWARDS for game_end, stop at first confirmed hit ──
+        # Scanning from the end means we find the real final buzzer immediately
+        # and avoid false positives from mid-game stoppages where the clock
+        # briefly shows sub-second values.
+        for i in reversed(indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            gate_conf = self._template_conf(frame)
+            if gate_conf < MIN_GAME_END_CONF:
+                continue
+
+            clock_str = self._ocr_clock(frame)
+            event     = self._classify_clock(clock_str)
+            if event == "game_end":
+                t = i / fps
+                logger.info(
+                    "  Clock event (reverse scan): t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
+                    t, clock_str, event, gate_conf,
+                )
+                raw_events.append({"time_s": t, "event": event})
+                break  # earliest confirmed hit from the end — done
+
+        # ── Pass 2: scan FORWARD for all other events (game_start, period_end) ──
         for i in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
             if not ret:
                 continue
 
-            # Fast gate: template match
             gate_conf = self._template_conf(frame)
             if gate_conf < self.template_threshold:
                 continue
 
-            # OCR the clock region to get exact time
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
-            if event:
+            if event and event != "game_end":
                 t = i / fps
                 logger.info(
                     "  Clock event: t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
@@ -156,6 +182,7 @@ class GameClockDetector:
         cap.release()
 
         # Merge consecutive detections of the same event type
+        raw_events.sort(key=lambda e: e["time_s"])
         merged = self._merge_events(raw_events, merge_gap_s)
         logger.info(
             "GameClockDetector: %d raw hit(s) → %d event(s): %s",
@@ -334,8 +361,8 @@ class GameClockDetector:
         if '1ST' in upper or '2ND' in upper:
             return 'period_end'
 
-        # Period label not readable — flag as game_end (conservative)
-        return 'game_end'
+        # Period label not readable — ignore rather than assume game_end
+        return None
 
     @staticmethod
     def _merge_events(events: list[dict], gap_s: float) -> list[dict]:

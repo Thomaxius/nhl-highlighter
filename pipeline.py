@@ -229,7 +229,8 @@ def run_pipeline(
                 promoted += 1
             r["label"] = "goal"
             r["confidence"] = 1.0
-        elif r.get("label") == "goal" and r.get("confidence", 0) < 0.92:
+        elif r.get("label") == "goal":
+            # No banner = no goal, regardless of model confidence
             logger.info(
                 "  Demoted → other: %s (conf=%.0f%%, no banner)",
                 Path(r["path"]).name, r.get("confidence", 0) * 100,
@@ -249,7 +250,8 @@ def run_pipeline(
     if clock_template.exists():
         logger.info("━━━  Step 4d: Game clock detection  ━━━")
         clock_detector = GameClockDetector(template_path=clock_template)
-        FINAL_SECONDS_WINDOW = 60.0  # include up to this many seconds before 0:00
+        FINAL_SECONDS_WINDOW = 5.0   # include up to this many seconds before 0:00
+        POST_GAME_END_S    = 20.0  # include this many seconds after 0:00 is detected
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -275,25 +277,47 @@ def run_pipeline(
 
             clock_events = clock_detector.scan_video(norm_clip)
 
+            # If multiple game_end events were detected (e.g. a false clock read
+            # mid-game and the real final buzzer), only keep the last one so the
+            # reel trim offsets are calculated from the true game-ending 0:00.
+            game_end_events = [e for e in clock_events if e["event"] == "game_end"]
+            if len(game_end_events) > 1:
+                logger.info(
+                    "Multiple game_end events detected (%d); keeping only the last (t=%.1fs)",
+                    len(game_end_events), game_end_events[-1]["time_s"],
+                )
+                clock_events = [e for e in clock_events if e["event"] != "game_end"] + [game_end_events[-1]]
+                clock_events.sort(key=lambda e: e["time_s"])
+
             for ev in clock_events:
                 ev_t   = ev["time_s"]
                 ev_type = ev["event"]
 
                 if ev_type == "game_end":
-                    window_start = ev_t - FINAL_SECONDS_WINDOW
-                    tagged = 0
+                    window_start  = ev_t - FINAL_SECONDS_WINDOW
+                    clip_end_abs  = ev_t + POST_GAME_END_S
+                    tagged        = 0
+                    tagged_times: list[tuple[float, dict]] = []
                     for (start_s, end_s, seg) in seg_times:
-                        if end_s > window_start and start_s < ev_t:
-                            seg["game_end"]   = True
+                        if end_s > window_start and start_s < clip_end_abs:
+                            seg["game_end"]    = True
                             seg["clock_event"] = ev_type
                             # Give a strong score so they survive ranking; score
                             # is set per-segment proportional to recency
                             recency = max(0.0, 1.0 - (ev_t - end_s) / FINAL_SECONDS_WINDOW)
                             seg["game_end_score"] = 1.0 + recency
+                            tagged_times.append((start_s, seg))
                             tagged += 1
+                    # Store trim offsets on the chronologically first segment so
+                    # reel_builder knows exactly where to start and stop the clip.
+                    if tagged_times:
+                        tagged_times.sort(key=lambda x: x[0])
+                        first_start_s, first_seg = tagged_times[0]
+                        first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
+                        first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
                     logger.info(
-                        "Game-end at t=%.1fs: tagged %d segment(s) covering final %.0fs",
-                        ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t),
+                        "Game-end at t=%.1fs: tagged %d segment(s) covering final %.0fs + %.0fs post",
+                        ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t), POST_GAME_END_S,
                     )
 
                 elif ev_type == "period_end":
