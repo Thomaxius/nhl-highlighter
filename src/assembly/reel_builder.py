@@ -56,6 +56,14 @@ def build_reel(
     groups: list[list[dict]] = []
     used_ids: set[int] = set()
 
+    # Collect intro segments — always go first regardless of label/confidence
+    intro_segs = sorted(
+        [s for s in segments if s.get("intro")],
+        key=lambda s: str(s["path"]),
+    )
+    for seg in intro_segs:
+        used_ids.add(id(seg))
+
     # Collect game_end segments separately — they always go last, unscored
     game_end_segs = [s for s in segments if s.get("game_end")]
     for seg in game_end_segs:
@@ -84,7 +92,10 @@ def build_reel(
             used_ids.add(id(seg))
 
     # Keep groups in chronological order (original segment discovery order).
-    # Append game_end group at the very end — all tagged segments form one block.
+    # Prepend intro group at the very start; append game_end group at the end.
+    if intro_segs:
+        groups.insert(0, intro_segs)
+
     if game_end_segs:
         # Sort by path name to preserve chronological order, exclude any segs
         # that are already included as goal/celebration/replay groups.
@@ -101,15 +112,18 @@ def build_reel(
         logger.warning("No highlight segments passed the filter — reel not created.")
         return output_path
 
-    # game_end clips are outside the max_clips limit — always include
-    # We added exactly 0 or 1 game_end group at the tail.
+    # intro and game_end groups are outside the max_clips limit — always included.
+    has_intro_group    = bool(intro_segs) and groups and groups[0][0].get("intro")
     has_game_end_group = bool(game_end_segs) and groups and groups[-1][0].get("game_end")
-    highlight_groups = groups[:-1] if has_game_end_group else groups
-    tail_groups      = groups[-1:] if has_game_end_group else []
-    selected_groups  = highlight_groups[:max_clips] + tail_groups
+    head_groups        = groups[:1]  if has_intro_group    else []
+    tail_groups        = groups[-1:] if has_game_end_group else []
+    middle_groups      = groups[len(head_groups): len(groups) - len(tail_groups)]
+    selected_groups    = head_groups + middle_groups[:max_clips] + tail_groups
 
-    logger.info("Building reel from %d groups (%d highlights + %d game_end) …",
-                len(selected_groups), len(highlight_groups[:max_clips]), len(tail_groups))
+    logger.info(
+        "Building reel from %d groups (%d intro + %d highlights + %d game_end) …",
+        len(selected_groups), len(head_groups), len(middle_groups[:max_clips]), len(tail_groups),
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -124,6 +138,25 @@ def build_reel(
                 merged = tmp / f"group_{group_idx:03d}_merged.mp4"
                 _merge_goal_sequence(group, merged, tmp)
                 src = merged
+            elif lead.get("intro"):
+                # ── Concat all intro segments, then trim to VS+6s … faceoff+7s ──
+                concat_intro = tmp / f"group_{group_idx:03d}_intro_raw.mp4"
+                paths = [Path(s["path"]) for s in group]
+                concat_txt = tmp / f"intro_list_{group_idx:03d}.txt"
+                concat_txt.write_text("\n".join(f"file '{p}'" for p in paths))
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                     "-i", str(concat_txt), "-c", "copy", str(concat_intro)],
+                    capture_output=True,
+                )
+                trim_start = lead.get("intro_clip_start_s", 0.0)
+                trim_end   = lead.get("intro_clip_end_s")
+                if trim_end is not None:
+                    trimmed_intro = tmp / f"group_{group_idx:03d}_intro.mp4"
+                    _ffmpeg_trim(concat_intro, trimmed_intro, trim_start, trim_end)
+                    src = trimmed_intro
+                else:
+                    src = concat_intro
             elif lead.get("game_end") and len(group) > 1:
                 # ── Concatenate all game-end segments into one final clip ──
                 merged = tmp / f"group_{group_idx:03d}_gameend.mp4"

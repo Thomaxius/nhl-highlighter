@@ -43,7 +43,7 @@ ROI_W = 0.215  # width      (fraction of frame width)
 ROI_H = 0.074  # height     (fraction of frame height) — tall enough for clock + period label (~80px @ 1080p)
 
 # Template match threshold below which we skip OCR entirely (speed gate).
-MIN_TEMPLATE_CONF = 0.55
+MIN_TEMPLATE_CONF = 0.45
 
 
 class GameClockDetector:
@@ -284,18 +284,29 @@ class GameClockDetector:
         """
         Classify a clock OCR string into an event type.
 
-        Returns ``"game_end"``, ``"period_end"``, or ``None``.
+        Returns one of ``"game_start"``, ``"period_start"``, ``"period_end"``,
+        ``"game_end"``, or ``None``.
 
         The OCR text contains two lines:
-          - Line 1: clock value, e.g. ``"0:01"``, ``":0.2"`` (sub-second tenths)
+          - Line 1: clock value, e.g. ``"20:00"``, ``"0:01"``, ``":0.2"``
           - Line 2: period label, e.g. ``"3RD"``, ``"1ST"``, ``"2ND"``, ``"OT"``
-
-        Uses the period label to distinguish game_end (3RD/OT) from
-        period_end (1ST/2ND).
         """
         upper = text.upper()
+        digits = re.findall(r'\d+', text)
 
-        # ── 1. Is the clock near zero? ────────────────────────────────────
+        # ── 1. Start of period: clock reads 20:00 ────────────────────────
+        if len(digits) >= 2:
+            try:
+                if int(digits[0]) == 20 and int(digits[1]) == 0:
+                    if '1ST' in upper:
+                        return 'game_start'
+                    if '2ND' in upper or '3RD' in upper or 'OT' in upper:
+                        return 'period_start'
+                    return 'game_start'  # conservative fallback (first period)
+            except ValueError:
+                pass
+
+        # ── 2. Is the clock near zero? ────────────────────────────────────
         # Sub-second display: digit(s) + dot, e.g. "0.2", ":0.2"
         near_zero = False
         if '.' in text:
@@ -303,7 +314,6 @@ class GameClockDetector:
             if not pre_dot or int(pre_dot[-1]) == 0:
                 near_zero = True
         else:
-            digits = re.findall(r'\d+', text)
             if len(digits) >= 2:
                 try:
                     near_zero = (int(digits[0]) == 0 and int(digits[1]) <= 5)
@@ -318,15 +328,13 @@ class GameClockDetector:
         if not near_zero:
             return None
 
-        # ── 2. Which period? ────────────────────────────────────────────
-        # 3RD period or OT = game could end here → game_end
-        # 1ST or 2ND = period end only
+        # ── 3. Which period ends? ─────────────────────────────────────────
         if '3RD' in upper or 'OT' in upper:
             return 'game_end'
         if '1ST' in upper or '2ND' in upper:
             return 'period_end'
 
-        # Period label not readable — still flag as game_end (conservative)
+        # Period label not readable — flag as game_end (conservative)
         return 'game_end'
 
     @staticmethod

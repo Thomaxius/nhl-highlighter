@@ -25,6 +25,7 @@ from src.detection.classifier import HighlightClassifier
 from src.detection.banner_detector import BannerDetector
 from src.detection.score_detector import ScoreDetector
 from src.detection.game_clock_detector import GameClockDetector
+from src.detection.vs_screen_detector import VsScreenDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -306,8 +307,93 @@ def run_pipeline(
                                 ev_t, Path(seg["path"]).name,
                             )
                             break
+
+                elif ev_type in ("game_start", "period_start"):
+                    # Tag the segment containing the puck-drop moment
+                    for (start_s, end_s, seg) in seg_times:
+                        if start_s <= ev_t < end_s:
+                            seg[ev_type] = True
+                            seg["clock_event"] = ev_type
+                            logger.info(
+                                "%s at t=%.1fs → %s",
+                                ev_type, ev_t, Path(seg["path"]).name,
+                            )
+                            break
     else:
         logger.info("Skipping game clock detection (configs/game_end_template.png not found)")
+
+    # ── Step 4d.5: VS screen → intro segment tagging ─────────────────────────
+    # Clip starts 6 s after the VS screen first appears and runs through
+    # game_start (20:00 clock) + 7 s of actual play.
+    # Tagged segments carry trim offsets so the reel builder can cut precisely:
+    #   intro_clip_start_s — seconds from the first tagged segment's start
+    #   intro_clip_end_s   — seconds from the first tagged segment's start
+    vs_template = Path("configs/vs_screen_template.png")
+    PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
+    POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
+    if vs_template.exists():
+        logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
+        vs_detector = VsScreenDetector(template_path=vs_template)
+
+        for norm_clip in normalised:
+            clip_stem = norm_clip.stem
+            clip_segs = sorted(
+                [r for r in results if clip_stem in str(r["path"])],
+                key=lambda r: r["path"],
+            )
+            if not clip_segs:
+                continue
+
+            # Build cumulative timeline
+            import cv2 as _cv2
+            seg_times2: list[tuple[float, float, dict]] = []
+            cum_t = 0.0
+            for seg in clip_segs:
+                _cap = _cv2.VideoCapture(str(seg["path"]))
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _n   = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                _cap.release()
+                dur = _n / _fps
+                seg_times2.append((cum_t, cum_t + dur, seg))
+                cum_t += dur
+
+            vs_t = vs_detector.scan_video(norm_clip, interval_s=0.5, search_window_s=60.0)
+            if vs_t is None:
+                logger.info("  No VS screen found in %s", norm_clip.name)
+                continue
+
+            intro_start = vs_t + PRE_VS_SKIP_S
+
+            # Find game_start time from already-tagged segments
+            game_start_t: float | None = None
+            for (start_s, end_s, seg) in seg_times2:
+                if seg.get("game_start"):
+                    game_start_t = start_s
+                    break
+
+            intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
+
+            # Tag segments spanning [intro_start, intro_end) and record exact
+            # trim offsets on the first tagged segment for the reel builder.
+            tagged = 0
+            first_intro_seg_start: float | None = None
+            for (start_s, end_s, seg) in seg_times2:
+                if end_s > intro_start and start_s < intro_end:
+                    seg["intro"] = True
+                    tagged += 1
+                    if first_intro_seg_start is None:
+                        first_intro_seg_start = start_s
+                        # How far into the concatenated intro block to start/end
+                        seg["intro_clip_start_s"] = max(0.0, intro_start - start_s)
+                        seg["intro_clip_end_s"]   = intro_end - start_s
+
+            logger.info(
+                "Intro: VS+%.0fs (t=%.1fs) → game_start+%.0fs (t=%.1fs): "
+                "tagged %d segment(s)",
+                PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
+            )
+    else:
+        logger.info("Skipping VS screen detection (configs/vs_screen_template.png not found)")
 
     # ── Step 4e: Score change detection (OCR) ────────────────────────────────
     logger.info("━━━  Step 4e: Score change detection  ━━━")
