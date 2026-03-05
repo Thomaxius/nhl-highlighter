@@ -156,6 +156,74 @@ class BannerDetector:
             "best_frame": best_frame,
         }
 
+    def scan_video(
+        self,
+        video_path: str | Path,
+        interval_s: float = 0.5,
+        merge_gap_s: float = 3.0,
+    ) -> list[float]:
+        """
+        Scan a full (non-split) video for GOAL banner frames.
+
+        Samples every *interval_s* seconds by seeking, which means it runs
+        on the raw high-quality video and is not affected by scene-cut
+        boundary artifacts that reduce per-segment confidence.
+
+        Args:
+            video_path:   Path to the normalised .mp4 file.
+            interval_s:   Seconds between sampled frames (default 0.5 → 2 fps).
+            merge_gap_s:  Consecutive banner timestamps within this window are
+                          collapsed into a single event (keeps only the first).
+
+        Returns:
+            Sorted list of timestamps (seconds) where the banner was detected.
+            Consecutive detections within *merge_gap_s* are merged to one event.
+        """
+        video_path = Path(video_path)
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        step = max(1, int(fps * interval_s))
+        indices = range(0, total_frames, step)
+        n_samples = len(indices)
+        # For a full-video scan the source is always the normalised 1920×1080 file
+        # so the banner appears at a predictable scale. Use only 3 scales to cut
+        # the per-frame cost from 40 matchTemplate calls down to 15, ~2.5× faster.
+        _fast_scales = [0.8, 0.9, 1.0]
+        logger.info(
+            "BannerDetector: scanning %s — %d samples at %.1fs intervals (fast scales)",
+            video_path.name, n_samples, interval_s,
+        )
+
+        raw_times: list[float] = []
+        for i in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            conf = self._match_template_in_frame(frame, scale_factors=_fast_scales)
+            if conf >= self.threshold:
+                t = i / fps
+                raw_times.append(t)
+                logger.info(
+                    "  Raw-scan banner hit: t=%.2fs  frame=%d  conf=%.3f",
+                    t, i, conf,
+                )
+        cap.release()
+
+        # Merge consecutive hits within merge_gap_s into a single event
+        merged: list[float] = []
+        for t in raw_times:
+            if not merged or t - merged[-1] > merge_gap_s:
+                merged.append(t)
+
+        logger.info(
+            "BannerDetector: raw scan found %d hit(s) → %d merged goal event(s)",
+            len(raw_times), len(merged),
+        )
+        return merged
+
     def score_segments(self, segments: list[dict], pre_goal_s: float = 7.0, post_goal_s: float = 3.0) -> list[dict]:
         """
         Run banner detection on all segments and boost scores where detected.
@@ -203,8 +271,23 @@ class BannerDetector:
     # Private helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _match_template_in_frame(self, frame: np.ndarray) -> float:
-        """Return the best template match confidence for a single frame."""
+    def _match_template_in_frame(
+        self,
+        frame: np.ndarray,
+        scale_factors: list[float] | None = None,
+        early_exit_threshold: float | None = None,
+    ) -> float:
+        """
+        Return the best template match confidence for a single frame.
+
+        Args:
+            scale_factors:          Override scale list (uses self.scale_factors by default).
+            early_exit_threshold:   Stop early if any template hits this confidence.
+                                    Defaults to self.threshold.
+        """
+        scales = scale_factors if scale_factors is not None else self.scale_factors
+        early_exit = early_exit_threshold if early_exit_threshold is not None else self.threshold
+
         h, w = frame.shape[:2]
 
         # Crop to ROI
@@ -218,7 +301,7 @@ class BannerDetector:
         best = 0.0
         for t_idx, template_gray in enumerate(self.templates_gray):
             t_best = 0.0
-            for scale in self.scale_factors:
+            for scale in scales:
                 th, tw = template_gray.shape
                 new_w = int(tw * scale)
                 new_h = int(th * scale)
@@ -235,6 +318,9 @@ class BannerDetector:
             logger.debug("  template[%d] best_conf=%.3f", t_idx, t_best)
             if t_best > best:
                 best = t_best
+            # Early exit — already above threshold, no need to try remaining templates
+            if best >= early_exit:
+                break
 
         return best
 

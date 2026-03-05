@@ -52,7 +52,8 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected")]
 
     for goal_idx in goal_indices:
-        base_score = results[goal_idx]["score"]
+        g = results[goal_idx]
+        base_score = g.get("score", g.get("confidence", 1.0))
         order = 1
         accumulated_gap_s = 0.0
 
@@ -148,13 +149,63 @@ def run_pipeline(
     classifier = HighlightClassifier(checkpoint_path=checkpoint)
     results = classifier.classify_segments(all_segments)
 
-    # ── Step 4b: Banner detection (GOAL! HUD overlay) ───────────────────────
-    # Auto-discovers all configs/goal_banner_template*.png — no path needed.
+    # ── Step 4b: Banner detection via raw-video scan ────────────────────────
+    # Scan the full normalised video at 1s intervals rather than per-split-
+    # segment.  Per-segment detection misses goals whose banner appears right
+    # at a scene cut (empirically conf ≈ 0.44 on segments vs 0.97 on the raw
+    # source).  After finding banner timestamps we map them back to the
+    # correct segment using a cumulative timeline.
+    import cv2 as _cv2
     templates = sorted(Path("configs").glob("goal_banner_template*.png"))
     if templates:
         logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(templates))
         detector = BannerDetector()  # auto-loads all matching templates
-        results = detector.score_segments(results)
+        PRE_GOAL_S  = 7.0
+        POST_GOAL_S = 3.0
+
+        for norm_clip in normalised:
+            clip_stem = norm_clip.stem
+            # Segments for this clip, sorted by filename (== chronological order)
+            clip_segs = sorted(
+                [r for r in results if clip_stem in str(r["path"])],
+                key=lambda r: r["path"],
+            )
+            if not clip_segs:
+                continue
+
+            # Build cumulative timeline: (start_s, end_s, seg_dict, seg_fps)
+            seg_ranges: list[tuple[float, float, dict, float]] = []
+            cum_t = 0.0
+            for seg in clip_segs:
+                _cap = _cv2.VideoCapture(str(seg["path"]))
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _n   = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                _cap.release()
+                dur = _n / _fps
+                seg_ranges.append((cum_t, cum_t + dur, seg, _fps))
+                cum_t += dur
+
+            # Scan the uncut normalised source — no scene-boundary artifacts
+            banner_times = detector.scan_video(norm_clip, interval_s=1.0)
+
+            for bt in banner_times:
+                for (start_s, end_s, seg, seg_fps) in seg_ranges:
+                    if start_s <= bt < end_s:
+                        local_t  = bt - start_s
+                        seg_dur  = end_s - start_s
+                        seg["banner_detected"]   = True
+                        seg["banner_confidence"] = 0.95
+                        seg["best_frame"]        = int(local_t * seg_fps)
+                        # Trim window centred on the goal frame, clamped to segment
+                        seg["trim_start_s"] = max(0.0, local_t - PRE_GOAL_S)
+                        seg["trim_end_s"]   = min(seg_dur, local_t + POST_GOAL_S)
+                        logger.info(
+                            "Banner detected via raw scan: t=%.1fs → %s  "
+                            "trim %.1fs→%.1fs",
+                            bt, Path(seg["path"]).name,
+                            seg["trim_start_s"], seg["trim_end_s"],
+                        )
+                        break  # each goal event maps to exactly one segment
     else:
         logger.info("Skipping banner detection (no templates found in configs/)")
 

@@ -45,6 +45,13 @@ def ingest_clips(
 
     processed: list[Path] = []
     for clip in clips:
+        # If the file is already normalised (stem ends with _norm), skip re-encoding
+        # and treat it as the output directly.
+        if clip.stem.endswith("_norm"):
+            logger.info("Already normalised, using as-is: %s", clip.name)
+            processed.append(clip)
+            continue
+
         out_path = output_dir / (clip.stem + "_norm.mp4")
         if out_path.exists() and not overwrite:
             if out_path.stat().st_size > 10_000:  # skip only if file looks valid (>10KB)
