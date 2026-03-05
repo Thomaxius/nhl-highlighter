@@ -84,18 +84,29 @@ def build_reel(
             used_ids.add(id(seg))
 
     # Keep groups in chronological order (original segment discovery order).
-    # Append game_end group(s) at the very end (use last-seen segment only)
+    # Append game_end group at the very end — all tagged segments form one block.
     if game_end_segs:
-        groups.append([game_end_segs[-1]])
+        # Sort by path name to preserve chronological order, exclude any segs
+        # that are already included as goal/celebration/replay groups.
+        game_end_segs_ordered = sorted(
+            [s for s in game_end_segs if id(s) not in used_ids],
+            key=lambda s: str(s["path"]),
+        )
+        for s in game_end_segs_ordered:
+            used_ids.add(id(s))
+        if game_end_segs_ordered:
+            groups.append(game_end_segs_ordered)
 
     if not groups:
         logger.warning("No highlight segments passed the filter — reel not created.")
         return output_path
 
     # game_end clips are outside the max_clips limit — always include
-    highlight_groups = groups[:-len(game_end_segs)] if game_end_segs else groups
-    tail_groups = groups[-len(game_end_segs):] if game_end_segs else []
-    selected_groups = highlight_groups[:max_clips] + tail_groups
+    # We added exactly 0 or 1 game_end group at the tail.
+    has_game_end_group = bool(game_end_segs) and groups and groups[-1][0].get("game_end")
+    highlight_groups = groups[:-1] if has_game_end_group else groups
+    tail_groups      = groups[-1:] if has_game_end_group else []
+    selected_groups  = highlight_groups[:max_clips] + tail_groups
 
     logger.info("Building reel from %d groups (%d highlights + %d game_end) …",
                 len(selected_groups), len(highlight_groups[:max_clips]), len(tail_groups))
@@ -112,6 +123,21 @@ def build_reel(
                 # ── Merge goal → celebration → replay into a single continuous clip ──
                 merged = tmp / f"group_{group_idx:03d}_merged.mp4"
                 _merge_goal_sequence(group, merged, tmp)
+                src = merged
+            elif lead.get("game_end") and len(group) > 1:
+                # ── Concatenate all game-end segments into one final clip ──
+                merged = tmp / f"group_{group_idx:03d}_gameend.mp4"
+                paths  = [Path(s["path"]) for s in group]
+                concat_txt = tmp / f"gameend_list_{group_idx:03d}.txt"
+                concat_txt.write_text("\n".join(f"file '{p}'" for p in paths))
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                     "-i", str(concat_txt), "-c", "copy", str(merged)],
+                    capture_output=True,
+                )
+                if r.returncode != 0:
+                    logger.warning("game_end concat failed: %s", r.stderr[-200:])
+                    merged = Path(lead["path"])  # fallback to first segment
                 src = merged
             else:
                 # ── Standalone clip (solo goal, save, hit, etc.) ──

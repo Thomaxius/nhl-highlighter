@@ -24,6 +24,7 @@ from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes
 from src.detection.classifier import HighlightClassifier
 from src.detection.banner_detector import BannerDetector
 from src.detection.score_detector import ScoreDetector
+from src.detection.game_clock_detector import GameClockDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -238,6 +239,75 @@ def run_pipeline(
         logger.info("  Promoted %d segment(s) to goal via banner detection.", promoted)
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
+
+    # ── Step 4d: Game clock detection (period / game end) ──────────────────
+    # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
+    # states. Segments covering the final ~60s before game end are tagged
+    # game_end=True so the reel builder always appends them.
+    clock_template = Path("configs/game_end_template.png")
+    if clock_template.exists():
+        logger.info("━━━  Step 4d: Game clock detection  ━━━")
+        clock_detector = GameClockDetector(template_path=clock_template)
+        FINAL_SECONDS_WINDOW = 60.0  # include up to this many seconds before 0:00
+
+        for norm_clip in normalised:
+            clip_stem = norm_clip.stem
+            clip_segs = sorted(
+                [r for r in results if clip_stem in str(r["path"])],
+                key=lambda r: r["path"],
+            )
+            if not clip_segs:
+                continue
+
+            # Build cumulative timeline for this clip
+            import cv2 as _cv2
+            seg_times: list[tuple[float, float, dict]] = []
+            cum_t = 0.0
+            for seg in clip_segs:
+                _cap = _cv2.VideoCapture(str(seg["path"]))
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _n   = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                _cap.release()
+                dur = _n / _fps
+                seg_times.append((cum_t, cum_t + dur, seg))
+                cum_t += dur
+
+            clock_events = clock_detector.scan_video(norm_clip)
+
+            for ev in clock_events:
+                ev_t   = ev["time_s"]
+                ev_type = ev["event"]
+
+                if ev_type == "game_end":
+                    window_start = ev_t - FINAL_SECONDS_WINDOW
+                    tagged = 0
+                    for (start_s, end_s, seg) in seg_times:
+                        if end_s > window_start and start_s < ev_t:
+                            seg["game_end"]   = True
+                            seg["clock_event"] = ev_type
+                            # Give a strong score so they survive ranking; score
+                            # is set per-segment proportional to recency
+                            recency = max(0.0, 1.0 - (ev_t - end_s) / FINAL_SECONDS_WINDOW)
+                            seg["game_end_score"] = 1.0 + recency
+                            tagged += 1
+                    logger.info(
+                        "Game-end at t=%.1fs: tagged %d segment(s) covering final %.0fs",
+                        ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t),
+                    )
+
+                elif ev_type == "period_end":
+                    # Tag the segment containing the period-end moment only
+                    for (start_s, end_s, seg) in seg_times:
+                        if start_s <= ev_t < end_s:
+                            seg["period_end"] = True
+                            seg["clock_event"] = ev_type
+                            logger.info(
+                                "Period-end at t=%.1fs → %s",
+                                ev_t, Path(seg["path"]).name,
+                            )
+                            break
+    else:
+        logger.info("Skipping game clock detection (configs/game_end_template.png not found)")
 
     # ── Step 4e: Score change detection (OCR) ────────────────────────────────
     logger.info("━━━  Step 4e: Score change detection  ━━━")
