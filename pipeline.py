@@ -26,6 +26,7 @@ from src.detection.banner_detector import BannerDetector
 from src.detection.score_detector import ScoreDetector
 from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
+from src.detection.pause_menu_detector import PauseMenuDetector
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -418,6 +419,32 @@ def run_pipeline(
             )
     else:
         logger.info("Skipping VS screen detection (configs/vs_screen_template.png not found)")
+
+    # ── Step 4d.9: Pause-menu detection ────────────────────────────────────
+    # Runs AFTER intro and game_end tagging so those guards work correctly.
+    # Segments where the ESC/pause menu is visible are demoted to "other".
+    # Skips intro/game_end segments (those are assembled directly, not scored).
+    pause_template = Path("configs/pause_menu_template.png")
+    if pause_template.exists():
+        logger.info("━━━  Step 4d.9: Pause-menu detection  ━━━")
+        pause_detector = PauseMenuDetector(template_path=pause_template)
+        paused_count = 0
+        for r in results:
+            if r.get("game_end") or r.get("intro"):
+                continue
+            res = pause_detector.detect(r["path"])
+            if res["detected"]:
+                logger.info(
+                    "  Pause menu → demoted: %s (conf=%.2f)",
+                    Path(r["path"]).name, res["max_conf"],
+                )
+                r["label"]    = "other"
+                r["has_menu"] = True
+                paused_count += 1
+        if paused_count:
+            logger.info("  Demoted %d segment(s) containing pause menu.", paused_count)
+    else:
+        logger.info("Skipping pause-menu detection (configs/pause_menu_template.png not found)")
 
     # ── Step 4e: Score change detection (OCR) ────────────────────────────────
     logger.info("━━━  Step 4e: Score change detection  ━━━")
