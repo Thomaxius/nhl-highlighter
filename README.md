@@ -2,6 +2,9 @@
 
 Automatically generate broadcast-style highlight reels from your NHL 25 PS5 clips using a fine-tuned VideoMAE model, audio spike detection, and FFmpeg-based assembly.
 
+## Notes
+This project is a quick 100% vibe coded slop for personal use. I didn't even write this disclaimer myself. Please don't let it be a reason for not headhunting, or let it be, but don't let the quality of programming or lack of it be it.
+
 ---
 
 ## Project Structure
