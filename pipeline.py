@@ -48,7 +48,7 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     - A second goal banner is detected
     - MAX_LOOKAHEAD segments have been checked
     """
-    FOLLOW_LABELS = {"celebration", "replay"}
+    FOLLOW_LABELS = {"celebration", "goal_replay"}
     MAX_LOOKAHEAD = 10
     MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
 

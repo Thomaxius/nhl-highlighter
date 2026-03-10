@@ -14,7 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Labels must match the order used during training.
-DEFAULT_LABELS = ["goal", "celebration", "replay", "other"]
+DEFAULT_LABELS = ["goal", "celebration", "goal_replay", "other_replay", "scoring_chance", "other"]
 
 
 class HighlightClassifier:
@@ -82,7 +82,7 @@ class HighlightClassifier:
 
     def is_highlight(self, result: dict, min_confidence: float = 0.55) -> bool:
         """Return True if a segment is highlight-worthy."""
-        highlight_labels = {"goal", "save", "hit", "fight", "celebration", "replay"}
+        highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "scoring_chance"}
         return (
             result["label"] in highlight_labels
             and result["confidence"] >= min_confidence

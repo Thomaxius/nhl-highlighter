@@ -31,9 +31,9 @@ model:
   labels:
     - goal
     - celebration
-    - replay
+    - goal_replay
+    - other_replay
     - scoring_chance
-    - transition
     - other
 
 # ── Training ──────────────────────────────────────────────────────────────────
