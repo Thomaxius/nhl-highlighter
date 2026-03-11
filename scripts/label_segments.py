@@ -11,7 +11,9 @@ Usage
 
 Controls
 --------
-    g → goal        c → celebration  r → replay
+    g → goal        c → celebration
+    r → goal_replay (slow-mo replay after a goal)
+    n → other_replay (cutscene / non-goal replay)
     s → scoring_chance               t → transition
     o → other
     SPACE → skip    q → quit
@@ -26,7 +28,8 @@ from pathlib import Path
 KEYMAP = {
     "g": "goal",
     "c": "celebration",
-    "r": "replay",
+    "r": "goal_replay",
+    "n": "other_replay",
     "s": "scoring_chance",
     "t": "transition",
     "o": "other",

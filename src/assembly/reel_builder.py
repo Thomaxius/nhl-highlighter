@@ -45,7 +45,7 @@ def build_reel(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Filter & rank
-    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "replay"}
+    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay"}
     filtered = [
         s for s in segments
         if s.get("label") in highlight_labels and s.get("confidence", 0) >= min_confidence
@@ -82,7 +82,7 @@ def build_reel(
                     group.append(follow)
                     used_ids.add(id(follow))
             groups.append(group)
-        elif seg.get("label") in {"celebration", "replay"}:
+        elif seg.get("label") in {"celebration", "goal_replay", "other_replay"}:
             # Never include celebration/replay unless chained to a goal — skip
             used_ids.add(id(seg))
             continue

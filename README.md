@@ -144,14 +144,16 @@ The classifier is trained on six classes. Sort short scene clips (2–30s) into 
 data/labeled/
     goal/            → scene contains the GOAL! HUD banner
     celebration/     → players celebrating after a goal
-    replay/          → slow-motion replay following a goal
+    goal_replay/     → slow-motion replay directly following a goal
+    other_replay/    → cutscenes, non-goal replays, coach/crowd reactions
     scoring_chance/  → shot on goal that didn't score (puck visible, no banner)
     other/           → faceoffs, stoppages, normal gameplay
     transition/      → very short black-frame cuts between scenes
 ```
 
 **Tips:**
-- `goal` and `celebration`/`replay` frequently appear back-to-back — the pipeline chains them automatically, so label each scene by what it primarily shows
+- `goal` and `celebration`/`goal_replay` frequently appear back-to-back — the pipeline chains them automatically, so label each scene by what it primarily shows
+- `goal_replay` = slow-mo shot replay after a goal; `other_replay` = cutscenes, bench/crowd shots, non-goal replays
 - `scoring_chance` is the hardest class — include close shots that look like goals but have no banner
 - `transition` clips are usually under 1 second and are skipped during reel assembly
 - Aim for **50+ clips per class** before training; balance matters more than raw count
@@ -163,6 +165,8 @@ python scripts/label_segments.py \
     --segments data/processed/segments/<game_folder> \
     --output data/labeled
 ```
+
+Keyboard shortcuts: `g` goal · `c` celebration · `r` goal_replay · `n` other_replay · `s` scoring_chance · `t` transition · `o` other · `SPACE` skip · `q` quit
 
 ---
 

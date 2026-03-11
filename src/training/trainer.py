@@ -144,9 +144,12 @@ def train(
         run_name="videomae-nhl-highlighter",
         logging_steps=10,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=2,        # 2 workers keeps RAM pressure low on 16 GB
+        # macOS: OpenCV video decoding uses AVFoundation which cannot survive a
+        # fork(). DataLoader workers on macOS use fork and segfault immediately.
+        # On Windows/Linux with CUDA you can safely set this to 2-4.
+        dataloader_num_workers=0,
         dataloader_pin_memory=torch.cuda.is_available(),
-        dataloader_persistent_workers=True,
+        dataloader_persistent_workers=False,  # must be False when num_workers=0
         remove_unused_columns=False,
     )
 
