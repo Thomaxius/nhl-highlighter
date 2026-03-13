@@ -45,7 +45,7 @@ def build_reel(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Filter & rank
-    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay"}
+    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay", "scoring_chance"}
     filtered = [
         s for s in segments
         if s.get("label") in highlight_labels and s.get("confidence", 0) >= min_confidence
@@ -82,8 +82,18 @@ def build_reel(
                     group.append(follow)
                     used_ids.add(id(follow))
             groups.append(group)
+        elif seg.get("label") == "scoring_chance":
+            # Start a scoring chance group and pull any chained replay along
+            group = [seg]
+            used_ids.add(id(seg))
+            for j in range(i + 1, min(i + 10, len(segments))):
+                follow = segments[j]
+                if follow.get("chain_sc_idx") == i:
+                    group.append(follow)
+                    used_ids.add(id(follow))
+            groups.append(group)
         elif seg.get("label") in {"celebration", "goal_replay", "other_replay"}:
-            # Never include celebration/replay unless chained to a goal — skip
+            # Never include celebration/replay unless chained to a goal or scoring chance — skip
             used_ids.add(id(seg))
             continue
         else:
@@ -197,6 +207,18 @@ def build_reel(
                     src = trimmed_ge if trimmed_ge.exists() else base
                 else:
                     src = base
+            elif lead.get("label") == "scoring_chance" and len(group) > 1:
+                # ── Scoring chance with chained replay: trim lead then concat ──
+                lead_src = Path(lead["path"])
+                if "trim_start_s" in lead and "trim_end_s" in lead:
+                    trimmed_lead = tmp / f"group_{group_idx:03d}_sc_lead.mp4"
+                    _ffmpeg_trim(lead_src, trimmed_lead, lead["trim_start_s"], lead["trim_end_s"])
+                    if trimmed_lead.exists():
+                        lead_src = trimmed_lead
+                parts = [lead_src] + [Path(s["path"]) for s in group[1:]]
+                merged = tmp / f"group_{group_idx:03d}_sc_merged.mp4"
+                _merge_clip_parts(parts, merged, tmp, f"{group_idx:03d}")
+                src = merged
             else:
                 # ── Standalone clip (solo goal, save, hit, etc.) ──
                 src = Path(lead["path"])
@@ -285,6 +307,29 @@ def _merge_goal_sequence(group: list[dict], output: Path, tmp: Path) -> None:
         reencoded.append(enc)
 
     concat_list = tmp / f"seq_concat_{output.stem}.txt"
+    concat_list.write_text("\n".join(f"file '{str(p)}'" for p in reencoded))
+    _ffmpeg_concat(concat_list, output)
+
+
+def _merge_clip_parts(parts: list[Path], output: Path, tmp: Path, tag: str) -> None:
+    """Re-encode a list of clip paths to a uniform spec then concatenate them."""
+    import shutil
+    reencoded: list[Path] = []
+    for k, p in enumerate(parts):
+        enc = tmp / f"merge_{tag}_{k}.mp4"
+        cmd = [
+            "ffmpeg", "-y", "-i", str(p),
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "aac", "-ar", "44100",
+            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1",
+            str(enc),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("Re-encode failed for merge part %d (%s), using original.", k, p.name)
+            shutil.copy2(p, enc)
+        reencoded.append(enc)
+    concat_list = tmp / f"merge_{tag}_concat.txt"
     concat_list.write_text("\n".join(f"file '{str(p)}'" for p in reencoded))
     _ffmpeg_concat(concat_list, output)
 

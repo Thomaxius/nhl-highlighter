@@ -97,6 +97,60 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     return results
 
 
+def _chain_scoring_chance_sequences(results: list[dict]) -> list[dict]:
+    """
+    After a scoring_chance segment, look ahead up to WINDOW_S seconds for a
+    replay (goal_replay or other_replay) and chain it so both are included in
+    the reel together: scoring_chance → replay.
+
+    Stops chaining when:
+    - A banner-detected goal or another scoring_chance is encountered
+    - Cumulative gap exceeds WINDOW_S (20s)
+    - MAX_LOOKAHEAD segments have been exhausted
+    - A replay already chained to a goal is found (don't steal it)
+    """
+    FOLLOW_LABELS = {"goal_replay", "other_replay"}
+    WINDOW_S = 20.0
+    MAX_LOOKAHEAD = 10
+
+    sc_indices = [i for i, r in enumerate(results) if r.get("label") == "scoring_chance"]
+
+    for sc_idx in sc_indices:
+        sc = results[sc_idx]
+        base_score = sc.get("score", sc.get("confidence", 1.0))
+        elapsed_s = 0.0
+
+        for j in range(1, MAX_LOOKAHEAD + 1):
+            next_idx = sc_idx + j
+            if next_idx >= len(results):
+                break
+
+            seg = results[next_idx]
+
+            # Stop at another goal or scoring chance
+            if seg.get("banner_detected") or seg.get("label") == "scoring_chance":
+                break
+
+            if seg.get("label") in FOLLOW_LABELS:
+                # Don't steal a replay already chained to a goal
+                if "chain_goal_idx" in seg:
+                    break
+                seg["chain_sc_idx"] = sc_idx
+                seg["score"] = base_score - 0.01
+                seg["confidence"] = max(seg.get("confidence", 0.0), 0.9)
+                logger.info(
+                    "  Chained %s to scoring_chance %d: %s",
+                    seg["label"], sc_idx, Path(seg["path"]).name,
+                )
+                break  # one replay per scoring chance is enough
+
+            elapsed_s += _get_clip_duration(seg["path"])
+            if elapsed_s > WINDOW_S:
+                break
+
+    return results
+
+
 def _get_clip_duration(video_path) -> float:
     """Return the duration of a video clip in seconds."""
     import cv2
@@ -106,6 +160,35 @@ def _get_clip_duration(video_path) -> float:
     cap.release()
     return frames / fps
 
+
+def _trim_scoring_chances(results: list[dict]) -> list[dict]:
+    """
+    Set trim_start_s / trim_end_s on every scoring_chance segment.
+
+    - If the preceding segment has label 'other' (e.g. a faceoff ran into
+      this clip), trim 3 s from the start to skip past the dead-ball content.
+    - Otherwise trim 1 s from the start to remove any transition artifacts.
+    - Always trim 1 s from the end.
+    """
+    TRIM_AFTER_OTHER = 3.0
+    TRIM_DEFAULT     = 1.0
+    TRIM_END         = 1.0
+    MIN_DURATION     = 0.5  # never trim below this
+
+    for i, seg in enumerate(results):
+        if seg.get("label") != "scoring_chance":
+            continue
+        prev_label = results[i - 1].get("label") if i > 0 else None
+        trim_start = TRIM_AFTER_OTHER if prev_label == "other" else TRIM_DEFAULT
+        duration   = _get_clip_duration(seg["path"])
+        trim_end   = max(trim_start + MIN_DURATION, duration - TRIM_END)
+        seg["trim_start_s"] = trim_start
+        seg["trim_end_s"]   = trim_end
+        logger.info(
+            "  SC trim [%.1fs → %.1fs] (prev=%s): %s",
+            trim_start, trim_end, prev_label, Path(seg["path"]).name,
+        )
+    return results
 
 
 def run_pipeline(
@@ -451,9 +534,13 @@ def run_pipeline(
     score_detector = ScoreDetector(sample_frames=6)
     results = score_detector.score_segments(results)
 
-    # ── Step 4f: Chain goal → celebration → replay ───────────────────────────
+    # ── Step 4f: Chain goal → celebration → replay; scoring_chance → replay ──
     logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
     results = _chain_goal_sequences(results)
+    logger.info("━━━  Step 4f.5: Chaining scoring chance replay sequences  ━━━")
+    results = _chain_scoring_chance_sequences(results)
+    logger.info("━━━  Step 4f.6: Trimming scoring chance clips  ━━━")
+    results = _trim_scoring_chances(results)
 
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")
