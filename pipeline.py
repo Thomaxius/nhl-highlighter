@@ -217,48 +217,77 @@ def run_pipeline(
         all_segments.extend(segs)
     logger.info("Total segments: %d", len(all_segments))
 
-    # ── Step 3: Audio analysis ───────────────────────────────────────────────
-    logger.info("━━━  Step 3: Audio analysis  ━━━")
-    all_spikes = []
-    for clip in normalised:
-        wav_path = audio_dir / (clip.stem + ".wav")
-        try:
-            extract_audio(clip, wav_path)
-            spikes = detect_energy_spikes(wav_path)
-            all_spikes.extend(spikes)
-        except Exception as e:
-            logger.warning("Audio analysis failed for %s: %s", clip.name, e)
+    # ── Steps 3 + 4 + 4b: run in parallel ─────────────────────────────────
+    # These three heavy scans are fully independent — each only needs
+    # `normalised` clips and/or `all_segments`.  Run them concurrently to
+    # overlap I/O-bound audio extraction, CPU-bound classification, and the
+    # OpenCV banner scan.
+    #
+    # NOTE: HighlightClassifier loads a PyTorch model; it is NOT thread-safe
+    # if shared between threads. We create it inside the worker so each thread
+    # owns its own instance (fine for single-clip jobs; for large batches use
+    # multiprocessing instead).
+    import concurrent.futures as _cf
 
-    # ── Step 4: Video classification ─────────────────────────────────────────
-    logger.info("━━━  Step 4: Classifying segments  ━━━")
-    classifier = HighlightClassifier(checkpoint_path=checkpoint)
-    results = classifier.classify_segments(all_segments)
+    def _run_audio(_normalised, _audio_dir):
+        logger.info("━━━  Step 3: Audio analysis  ━━━")
+        _spikes = []
+        for clip in _normalised:
+            wav_path = _audio_dir / (clip.stem + ".wav")
+            try:
+                extract_audio(clip, wav_path)
+                _spikes.extend(detect_energy_spikes(wav_path))
+            except Exception as e:
+                logger.warning("Audio analysis failed for %s: %s", clip.name, e)
+        return _spikes
 
-    # ── Step 4b: Banner detection via raw-video scan ────────────────────────
-    # Scan the full normalised video at 1s intervals rather than per-split-
-    # segment.  Per-segment detection misses goals whose banner appears right
-    # at a scene cut (empirically conf ≈ 0.44 on segments vs 0.97 on the raw
-    # source).  After finding banner timestamps we map them back to the
-    # correct segment using a cumulative timeline.
+    def _run_classify(_all_segments, _checkpoint):
+        logger.info("━━━  Step 4: Classifying segments  ━━━")
+        _clf = HighlightClassifier(checkpoint_path=_checkpoint)
+        return _clf.classify_segments(_all_segments)
+
+    def _run_banner(_normalised):
+        _templates = sorted(Path("configs").glob("goal_banner_template*.png"))
+        if not _templates:
+            logger.info("Skipping banner detection (no templates found in configs/)")
+            return {}
+        logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(_templates))
+        import cv2 as _cv2
+        _det = BannerDetector()
+        PRE_GOAL_S, POST_GOAL_S = 7.0, 3.0
+        banner_results: dict = {}  # clip_stem → list of (bt, seg_ranges)
+        _timeline: dict = {}
+        for norm_clip in _normalised:
+            _banner_times = _det.scan_video(norm_clip, interval_s=1.0)
+            _timeline[norm_clip.stem] = {"times": _banner_times, "pre": PRE_GOAL_S, "post": POST_GOAL_S}
+        return _timeline
+
+    logger.info("Running Steps 3 / 4 / 4b in parallel…")
+    with _cf.ThreadPoolExecutor(max_workers=3) as pool:
+        fut_audio  = pool.submit(_run_audio,    normalised, audio_dir)
+        fut_clf    = pool.submit(_run_classify,  all_segments, checkpoint)
+        fut_banner = pool.submit(_run_banner,    normalised)
+        all_spikes     = fut_audio.result()
+        results        = fut_clf.result()
+        banner_timeline = fut_banner.result()
+    logger.info("Parallel steps complete.")
+
+    # ── Step 4b (merge): apply banner timeline back onto results ──────────────
     import cv2 as _cv2
-    templates = sorted(Path("configs").glob("goal_banner_template*.png"))
-    if templates:
-        logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(templates))
-        detector = BannerDetector()  # auto-loads all matching templates
-        PRE_GOAL_S  = 7.0
-        POST_GOAL_S = 3.0
-
+    if banner_timeline:
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
-            # Segments for this clip, sorted by filename (== chronological order)
+            tl = banner_timeline.get(clip_stem)
+            if not tl:
+                continue
+            PRE_GOAL_S  = tl["pre"]
+            POST_GOAL_S = tl["post"]
             clip_segs = sorted(
                 [r for r in results if clip_stem in str(r["path"])],
                 key=lambda r: r["path"],
             )
             if not clip_segs:
                 continue
-
-            # Build cumulative timeline: (start_s, end_s, seg_dict, seg_fps)
             seg_ranges: list[tuple[float, float, dict, float]] = []
             cum_t = 0.0
             for seg in clip_segs:
@@ -269,11 +298,7 @@ def run_pipeline(
                 dur = _n / _fps
                 seg_ranges.append((cum_t, cum_t + dur, seg, _fps))
                 cum_t += dur
-
-            # Scan the uncut normalised source — no scene-boundary artifacts
-            banner_times = detector.scan_video(norm_clip, interval_s=1.0)
-
-            for bt in banner_times:
+            for bt in tl["times"]:
                 for (start_s, end_s, seg, seg_fps) in seg_ranges:
                     if start_s <= bt < end_s:
                         local_t  = bt - start_s
@@ -281,18 +306,14 @@ def run_pipeline(
                         seg["banner_detected"]   = True
                         seg["banner_confidence"] = 0.95
                         seg["best_frame"]        = int(local_t * seg_fps)
-                        # Trim window centred on the goal frame, clamped to segment
                         seg["trim_start_s"] = max(0.0, local_t - PRE_GOAL_S)
                         seg["trim_end_s"]   = min(seg_dur, local_t + POST_GOAL_S)
                         logger.info(
-                            "Banner detected via raw scan: t=%.1fs → %s  "
-                            "trim %.1fs→%.1fs",
+                            "Banner detected via raw scan: t=%.1fs → %s  trim %.1fs→%.1fs",
                             bt, Path(seg["path"]).name,
                             seg["trim_start_s"], seg["trim_end_s"],
                         )
-                        break  # each goal event maps to exactly one segment
-    else:
-        logger.info("Skipping banner detection (no templates found in configs/)")
+                        break
 
     # ── Step 4c: Banner is the ground truth — hard override ──────────────────
     # If the GOAL! banner was detected, the segment IS a goal, period.
@@ -326,15 +347,15 @@ def run_pipeline(
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
 
     # ── Step 4d: Game clock detection (period / game end) ──────────────────
-    # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
-    # states. Segments covering the final ~60s before game end are tagged
-    # game_end=True so the reel builder always appends them.
+    # Scans the raw video for 0:00 (regulation_end) and 0:01 (period end) clock
+    # states. regulation_end times are recorded and used in Step 4d.8 to anchor
+    # the start of the final game_end clip (from buzzer to END OF GAME + 30s).
     clock_template = Path("configs/game_end_template.png")
+    # Dict of clip_stem → regulation_end time (seconds) — consumed in Step 4d.8
+    _clip_regulation_end_t: dict[str, float] = {}
     if clock_template.exists():
         logger.info("━━━  Step 4d: Game clock detection  ━━━")
         clock_detector = GameClockDetector(template_path=clock_template)
-        FINAL_SECONDS_WINDOW = 5.0   # include up to this many seconds before 0:00
-        POST_GAME_END_S    = 20.0  # include this many seconds after 0:00 is detected
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -360,47 +381,43 @@ def run_pipeline(
 
             clock_events = clock_detector.scan_video(norm_clip)
 
-            # If multiple game_end events were detected (e.g. a false clock read
-            # mid-game and the real final buzzer), only keep the last one so the
-            # reel trim offsets are calculated from the true game-ending 0:00.
-            game_end_events = [e for e in clock_events if e["event"] == "game_end"]
-            if len(game_end_events) > 1:
-                logger.info(
-                    "Multiple game_end events detected (%d); keeping only the last (t=%.1fs)",
-                    len(game_end_events), game_end_events[-1]["time_s"],
-                )
-                clock_events = [e for e in clock_events if e["event"] != "game_end"] + [game_end_events[-1]]
-                clock_events.sort(key=lambda e: e["time_s"])
-
             for ev in clock_events:
                 ev_t   = ev["time_s"]
                 ev_type = ev["event"]
 
-                if ev_type == "game_end":
-                    window_start  = ev_t - FINAL_SECONDS_WINDOW
-                    clip_end_abs  = ev_t + POST_GAME_END_S
-                    tagged        = 0
-                    tagged_times: list[tuple[float, dict]] = []
+                if ev_type == "regulation_end":
+                    # 3RD period buzzer — record as window start for game_end clip
+                    # AND tag the surrounding segments as a standalone highlight.
+                    _clip_regulation_end_t[clip_stem] = ev_t
+
+                    RE_PRE_S  = 5.0   # seconds before buzzer to include
+                    RE_POST_S = 15.0  # seconds after buzzer to include
+                    window_start = ev_t - RE_PRE_S
+                    clip_end_abs = ev_t + RE_POST_S
+                    tagged_re: list[tuple[float, dict]] = []
                     for (start_s, end_s, seg) in seg_times:
                         if end_s > window_start and start_s < clip_end_abs:
-                            seg["game_end"]    = True
-                            seg["clock_event"] = ev_type
-                            # Give a strong score so they survive ranking; score
-                            # is set per-segment proportional to recency
-                            recency = max(0.0, 1.0 - (ev_t - end_s) / FINAL_SECONDS_WINDOW)
-                            seg["game_end_score"] = 1.0 + recency
-                            tagged_times.append((start_s, seg))
-                            tagged += 1
-                    # Store trim offsets on the chronologically first segment so
-                    # reel_builder knows exactly where to start and stop the clip.
-                    if tagged_times:
-                        tagged_times.sort(key=lambda x: x[0])
-                        first_start_s, first_seg = tagged_times[0]
+                            seg["regulation_end"] = True
+                            seg["clock_event"]    = "regulation_end"
+                            tagged_re.append((start_s, seg))
+                    if tagged_re:
+                        tagged_re.sort(key=lambda x: x[0])
+                        first_start_s, first_seg = tagged_re[0]
                         first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
                         first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
                     logger.info(
-                        "Game-end at t=%.1fs: tagged %d segment(s) covering final %.0fs + %.0fs post",
-                        ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t), POST_GAME_END_S,
+                        "Regulation-end (3RD buzzer) at t=%.1fs — tagged %d segment(s) [%.1fs, %.1fs] in %s",
+                        ev_t, len(tagged_re), window_start, clip_end_abs, norm_clip.name,
+                    )
+
+                elif ev_type == "ot_period_end":
+                    # An OT period ran to 0:00 — another OT follows; game is NOT over.
+                    # Log it but don't update regulation_end_t (we always anchor
+                    # the game_end window from the 3RD period buzzer so all OT
+                    # footage is captured between regulation_end and EOG screen).
+                    logger.info(
+                        "OT period ran out at t=%.1fs (another OT follows) in %s",
+                        ev_t, norm_clip.name,
                     )
 
                 elif ev_type == "period_end":
@@ -501,6 +518,126 @@ def run_pipeline(
             )
     else:
         logger.info("Skipping VS screen detection (configs/vs_screen_template.png not found)")
+
+    # ── Step 4d.8: END OF GAME screen detection ────────────────────────────────
+    # The END OF GAME scoreboard overlay is the most reliable signal for where
+    # the game truly ended.  game_end clip = [eog_t−60s, eog_t+30s].
+    # Any regulation_end that fired AFTER the EOG screen is a clock OCR false
+    # positive (celebration HUD misread as 0:00 3RD) and is discarded here.
+    eog_template = Path("configs/pause_menu_template_end_of_game.png")
+    if eog_template.exists():
+        logger.info("━━━  Step 4d.8: END OF GAME screen detection  ━━━")
+        eog_detector = PauseMenuDetector(
+            template_path=eog_template,
+            threshold=0.60,
+            sample_frames=6,
+        )
+        PRE_EOG_S  = 60.0  # seconds before EOG screen to include (catches OT goal)
+        POST_EOG_S = 30.0  # seconds after EOG screen to include
+
+        for norm_clip in normalised:
+            clip_stem = norm_clip.stem
+            clip_segs = sorted(
+                [r for r in results if clip_stem in str(r["path"])],
+                key=lambda r: r["path"],
+            )
+            if not clip_segs:
+                continue
+
+            # Build cumulative timeline
+            import cv2 as _cv2
+            seg_times_eog: list[tuple[float, float, dict]] = []
+            cum_t = 0.0
+            for seg in clip_segs:
+                _cap = _cv2.VideoCapture(str(seg["path"]))
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _n   = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                _cap.release()
+                dur = _n / _fps
+                seg_times_eog.append((cum_t, cum_t + dur, seg))
+                cum_t += dur
+
+            # Find the LAST segment containing END OF GAME screen — always take
+            # the latest occurrence because earlier clips can false-positive on
+            # intermission or scoreboard overlays that superficially match.
+            # OCR verification ensures the frame actually contains "END OF GAME"
+            # text, not just a visually similar pause/intermission overlay.
+            eog_t: float | None = None
+            eog_conf: float = 0.0
+            eog_name: str = ""
+            for (start_s, end_s, seg) in seg_times_eog:
+                res = eog_detector.detect(
+                    seg["path"],
+                    require_ocr_text=["END OF GAME", "END OF", "END", "GAME"],
+                )
+                if res["detected"]:
+                    cand_t = start_s + (end_s - start_s) * 0.5
+                    logger.info(
+                        "  END OF GAME candidate at ~t=%.1fs (conf=%.2f): %s",
+                        cand_t, res["max_conf"], Path(seg["path"]).name,
+                    )
+                    eog_t    = cand_t
+                    eog_conf = res["max_conf"]
+                    eog_name = Path(seg["path"]).name
+
+            if eog_t is None:
+                logger.info("  No END OF GAME screen found in %s", norm_clip.name)
+                continue
+
+            logger.info(
+                "  END OF GAME screen — using last hit at ~t=%.1fs (conf=%.2f): %s",
+                eog_t, eog_conf, eog_name,
+            )
+
+            # Discard any regulation_end that fired at/after the EOG screen —
+            # that is a clock OCR false positive in the celebration footage.
+            regulation_end_t = _clip_regulation_end_t.get(clip_stem)
+            if regulation_end_t is not None and regulation_end_t >= eog_t - 5.0:
+                logger.warning(
+                    "  regulation_end_t (%.1fs) >= eog_t-5s (%.1fs) — "
+                    "discarding as false positive, clearing segment tags",
+                    regulation_end_t, eog_t,
+                )
+                for (_, _, seg) in seg_times_eog:
+                    seg.pop("regulation_end", None)
+                    seg.pop("game_end_trim_start_s", None)
+                    seg.pop("game_end_trim_end_s", None)
+                _clip_regulation_end_t.pop(clip_stem, None)
+
+            # Clear stale game_end tags before re-tagging
+            for (_, _, seg) in seg_times_eog:
+                seg.pop("game_end", None)
+                seg.pop("game_end_trim_start_s", None)
+                seg.pop("game_end_trim_end_s", None)
+                seg.pop("game_end_score", None)
+
+            # Tag game_end window: 60s before EOG through EOG+30s.
+            # Skips segments already claimed by the regulation_end clip so the
+            # 3RD-period buzzer moment stays as a separate highlight for OT games.
+            window_start = eog_t - PRE_EOG_S
+            clip_end_abs = eog_t + POST_EOG_S
+            tagged = 0
+            tagged_times_eog: list[tuple[float, dict]] = []
+            for (start_s, end_s, seg) in seg_times_eog:
+                if seg.get("regulation_end"):
+                    continue  # don't absorb the 3RD-buzzer clip into game_end
+                if end_s > window_start and start_s < clip_end_abs:
+                    seg["game_end"]       = True
+                    seg["clock_event"]    = "game_end"
+                    seg["game_end_score"] = 1.0
+                    tagged_times_eog.append((start_s, seg))
+                    tagged += 1
+            if tagged_times_eog:
+                tagged_times_eog.sort(key=lambda x: x[0])
+                first_start_s, first_seg = tagged_times_eog[0]
+                first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
+                first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
+            logger.info(
+                "Game-end clip: window=[%.1fs, %.1fs], %d segment(s) tagged",
+                window_start, clip_end_abs, tagged,
+            )
+    else:
+        logger.info("Skipping END OF GAME screen detection (template not found)")
 
     # ── Step 4d.9: Pause-menu detection ────────────────────────────────────
     # Runs AFTER intro and game_end tagging so those guards work correctly.

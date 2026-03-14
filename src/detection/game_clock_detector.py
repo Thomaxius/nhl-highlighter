@@ -63,6 +63,7 @@ class GameClockDetector:
     def __init__(
         self,
         template_path: str | Path = "configs/game_end_template.png",
+        ot_template_path: str | Path = "configs/game_clock_ot.png",
         template_threshold: float = MIN_TEMPLATE_CONF,
         scale_factors: list[float] | None = None,
     ) -> None:
@@ -78,6 +79,15 @@ class GameClockDetector:
         self.template_gray = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
         if self.template_gray is None:
             raise ValueError(f"Could not read template: {template_path}")
+
+        # All templates to check — regular + optional OT variant
+        self._all_templates: list[np.ndarray] = [self.template_gray]
+        ot_path = Path(ot_template_path)
+        if ot_path.exists():
+            ot_t = cv2.imread(str(ot_path), cv2.IMREAD_GRAYSCALE)
+            if ot_t is not None:
+                self._all_templates.append(ot_t)
+                logger.info("OT clock template loaded (%dx%d)", ot_t.shape[1], ot_t.shape[0])
 
         logger.info(
             "GameClockDetector ready — template %dx%d, gate threshold %.2f",
@@ -133,10 +143,13 @@ class GameClockDetector:
 
         raw_events: list[dict] = []
 
-        # ── Pass 1: scan BACKWARDS for game_end, stop at first confirmed hit ──
-        # Scanning from the end means we find the real final buzzer immediately
-        # and avoid false positives from mid-game stoppages where the clock
-        # briefly shows sub-second values.
+        # Terminal events: only regulation_end (3RD buzzer) triggers the
+        # reverse-scan stop.  OT period buzzers (ot_period_end) are found in
+        # the forward pass and logged but don't anchor the game_end window.
+        _TERMINAL = {"regulation_end"}
+
+        # ── Pass 1: scan BACKWARDS for regulation_end, stop at first hit ─────
+        # Finds the last 0:00 in the video (could be 3RD or OT period).
         for i in reversed(indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
@@ -149,7 +162,7 @@ class GameClockDetector:
 
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
-            if event == "game_end":
+            if event in _TERMINAL:
                 t = i / fps
                 logger.info(
                     "  Clock event (reverse scan): t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
@@ -171,7 +184,7 @@ class GameClockDetector:
 
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
-            if event and event != "game_end":
+            if event and event not in _TERMINAL:
                 t = i / fps
                 logger.info(
                     "  Clock event: t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
@@ -245,20 +258,21 @@ class GameClockDetector:
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
         return gray, x0, y0
 
-    def _template_match(self, frame: np.ndarray) -> tuple[float, int, int, int, int]:
+    def _template_match(self, frame: np.ndarray, template: np.ndarray | None = None) -> tuple[float, int, int, int, int]:
         """
         Return ``(conf, abs_x, abs_y, matched_w, matched_h)`` where
         ``abs_x / abs_y`` are coordinates in the *full frame*.
         """
+        tmpl = template if template is not None else self.template_gray
         gray, ox, oy = self._search_region(frame)
         best_conf, best_loc, best_w, best_h = 0.0, (0, 0), 0, 0
         for scale in self.scale_factors:
-            th, tw = self.template_gray.shape[:2]
+            th, tw = tmpl.shape[:2]
             new_h = max(1, int(th * scale))
             new_w = max(1, int(tw * scale))
             if new_h > gray.shape[0] or new_w > gray.shape[1]:
                 continue
-            resized = cv2.resize(self.template_gray, (new_w, new_h))
+            resized = cv2.resize(tmpl, (new_w, new_h))
             res = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
             _, v, _, loc = cv2.minMaxLoc(res)
             if v > best_conf:
@@ -268,9 +282,18 @@ class GameClockDetector:
         abs_y = oy + best_loc[1]
         return best_conf, abs_x, abs_y, best_w, best_h
 
+    def _best_template_match(self, frame: np.ndarray) -> tuple[float, int, int, int, int]:
+        """Try all loaded templates and return the result with highest confidence."""
+        best = self._template_match(frame, self._all_templates[0])
+        for tmpl in self._all_templates[1:]:
+            result = self._template_match(frame, tmpl)
+            if result[0] > best[0]:
+                best = result
+        return best
+
     def _template_conf(self, frame: np.ndarray) -> float:
-        """Return the best template-match confidence."""
-        return self._template_match(frame)[0]
+        """Return the best template-match confidence across all loaded templates."""
+        return self._best_template_match(frame)[0]
 
     def _ocr_clock(self, frame: np.ndarray) -> str:
         """
@@ -285,7 +308,7 @@ class GameClockDetector:
         gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # Locate the clock in the full frame via template matching
-        _, ax, ay, mw, mh = self._template_match(frame)
+        _, ax, ay, mw, mh = self._best_template_match(frame)
 
         # Add a strip below the matched region for the period label
         # ("3RD"/"1ST"/"2ND"), roughly 40% of the matched height.
@@ -302,7 +325,7 @@ class GameClockDetector:
         _, bw = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         # PSM 6 = assume uniform block of text (clock digits + period label)
-        cfg  = "--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789:.RDSTHN"
+        cfg  = "--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789:.ORDSTHN"
         text = pytesseract.image_to_string(bw, config=cfg).strip()
         return text
 
@@ -356,8 +379,10 @@ class GameClockDetector:
             return None
 
         # ── 3. Which period ends? ─────────────────────────────────────────
-        if '3RD' in upper or 'OT' in upper:
-            return 'game_end'
+        if 'OT' in upper:
+            return 'ot_period_end'  # OT period ran out — another OT or shootout follows
+        if '3RD' in upper:
+            return 'regulation_end'  # end of regulation; OT may follow
         if '1ST' in upper or '2ND' in upper:
             return 'period_end'
 

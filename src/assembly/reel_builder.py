@@ -69,8 +69,29 @@ def build_reel(
     for seg in game_end_segs:
         used_ids.add(id(seg))
 
+    # NOTE: regulation_end segments are NOT pre-collected here.
+    # They flow through the main loop below at their natural chronological
+    # position so OT highlights correctly appear AFTER the 3rd period end clip.
+
     for i, seg in enumerate(segments):
-        if id(seg) in used_ids or seg not in filtered:
+        if id(seg) in used_ids:
+            continue
+        # Regulation-end clip: always included at its chronological position
+        # regardless of label/confidence so OT highlights follow naturally.
+        # Collect all consecutive regulation_end-tagged segments into one group.
+        if seg.get("regulation_end"):
+            group = [seg]
+            used_ids.add(id(seg))
+            for j in range(i + 1, len(segments)):
+                nxt = segments[j]
+                if nxt.get("regulation_end") and id(nxt) not in used_ids:
+                    group.append(nxt)
+                    used_ids.add(id(nxt))
+                else:
+                    break
+            groups.append(group)
+            continue
+        if seg not in filtered:
             continue
         if seg.get("banner_detected"):
             # Start a goal group and collect chained follow-ups in order
@@ -121,17 +142,18 @@ def build_reel(
         logger.warning("No highlight segments passed the filter — reel not created.")
         return output_path
 
-    # intro and game_end groups are outside the max_clips limit — always included.
-    has_intro_group    = bool(intro_segs) and groups and groups[0][0].get("intro")
-    has_game_end_group = bool(game_end_segs) and groups and groups[-1][0].get("game_end")
-    head_groups        = groups[:1]  if has_intro_group    else []
-    tail_groups        = groups[-1:] if has_game_end_group else []
-    middle_groups      = groups[len(head_groups): len(groups) - len(tail_groups)]
-    selected_groups    = head_groups + middle_groups[:max_clips] + tail_groups
+    # intro and game_end groups are outside the max_clips limit.
+    has_intro_group = bool(intro_segs) and groups and groups[0][0].get("intro")
+    n_tail          = int(bool(game_end_segs))
+    head_groups     = groups[:1] if has_intro_group else []
+    tail_groups     = groups[len(groups) - n_tail:] if n_tail else []
+    middle_groups   = groups[len(head_groups): len(groups) - n_tail]
+    selected_groups = head_groups + middle_groups[:max_clips] + tail_groups
 
     logger.info(
         "Building reel from %d groups (%d intro + %d highlights + %d game_end) …",
-        len(selected_groups), len(head_groups), len(middle_groups[:max_clips]), len(tail_groups),
+        len(selected_groups), len(head_groups), len(middle_groups[:max_clips]),
+        int(bool(game_end_segs)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,8 +195,8 @@ def build_reel(
                         src = trimmed_intro if trimmed_intro.exists() else concat_intro
                     else:
                         src = concat_intro
-            elif lead.get("game_end"):
-                # ── Concatenate all game-end segments then trim 20s post-event ──
+            elif lead.get("game_end") or lead.get("regulation_end"):
+                # ── Concatenate period-end segments (regulation or OT) and trim ──
                 if len(group) > 1:
                     raw_gameend = tmp / f"group_{group_idx:03d}_gameend_raw.mp4"
                     paths       = [Path(s["path"]).resolve() for s in group]

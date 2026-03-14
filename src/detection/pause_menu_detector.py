@@ -19,8 +19,8 @@ import cv2
 logger = logging.getLogger(__name__)
 
 # Top-left region (fraction of frame) — matches where the template was cropped
-ROI_Y2 = 0.12   # top 12% of height
-ROI_X2 = 0.20   # left 20% of width
+ROI_Y2 = 0.20   # top 20% of height  (covers both PAUSE ~80px and END OF GAME ~150px templates)
+ROI_X2 = 0.35   # left 35% of width  (covers both PAUSE ~250px and END OF GAME ~500px templates)
 
 DEFAULT_TEMPLATE  = "configs/pause_menu_template.png"
 DEFAULT_THRESHOLD = 0.65   # gameplay peaks at ~0.36; menu at ~0.89
