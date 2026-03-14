@@ -23,7 +23,6 @@ from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
 from src.detection.classifier import HighlightClassifier
 from src.detection.banner_detector import BannerDetector
-from src.detection.score_detector import ScoreDetector
 from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
 from src.detection.pause_menu_detector import PauseMenuDetector
@@ -528,11 +527,6 @@ def run_pipeline(
             logger.info("  Demoted %d segment(s) containing pause menu.", paused_count)
     else:
         logger.info("Skipping pause-menu detection (configs/pause_menu_template.png not found)")
-
-    # ── Step 4e: Score change detection (OCR) ────────────────────────────────
-    logger.info("━━━  Step 4e: Score change detection  ━━━")
-    score_detector = ScoreDetector(sample_frames=6)
-    results = score_detector.score_segments(results)
 
     # ── Step 4f: Chain goal → celebration → replay; scoring_chance → replay ──
     logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
