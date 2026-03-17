@@ -391,22 +391,84 @@ def run_pipeline(
                     _clip_regulation_end_t[clip_stem] = ev_t
 
                     RE_PRE_S  = 5.0   # seconds before buzzer to include
-                    RE_POST_S = 15.0  # seconds after buzzer to include
+                    RE_POST_S = 60.0  # fallback max — smart trim shrinks this to
+                                      # the first intermission/EOG screen found
                     window_start = ev_t - RE_PRE_S
                     clip_end_abs = ev_t + RE_POST_S
+                    logger.info(
+                        "  regulation_end: buzzer at t=%.1fs, initial window [%.1fs, %.1fs]",
+                        ev_t, window_start, clip_end_abs,
+                    )
+
+                    # ── Smart trim: stop at the first intermission / EOG screen ──
+                    # Scan ALL segments whose start time is after the buzzer and
+                    # within the fallback window.  Stop at the first one that
+                    # contains INTERMISSION or END OF GAME text.  RE_POST_S is
+                    # deliberately generous (60 s) so the intermission screen is
+                    # always within range; the trim brings the clip end back.
+                    _re_stop_detector = PauseMenuDetector(
+                        template_path=Path("configs/pause_menu_template_end_of_game.png"),
+                        threshold=0.60,
+                        sample_frames=4,
+                    ) if Path("configs/pause_menu_template_end_of_game.png").exists() else None
+                    if _re_stop_detector is not None:
+                        logger.info(
+                            "  Scanning for intermission screen in [%.1fs, %.1fs] …",
+                            ev_t, clip_end_abs,
+                        )
+                        for (s_s, e_s, seg) in seg_times:
+                            if s_s < ev_t or s_s >= clip_end_abs:
+                                continue
+                            hit = _re_stop_detector.detect(
+                                seg["path"],
+                                require_ocr_text=["INTERMISSION", "END OF GAME", "END", "GAME"],
+                            )
+                            seg_name = Path(seg["path"]).name
+                            if hit["detected"]:
+                                clip_end_abs = s_s  # stop just before this segment
+                                logger.info(
+                                    "  regulation_end clip trimmed at %.1fs "
+                                    "(found '%s' in %s, conf=%.2f)",
+                                    clip_end_abs,
+                                    hit.get("ocr_text", "").replace("\n", " ").strip()[:80],
+                                    seg_name, hit.get("max_conf", 0.0),
+                                )
+                                break
+                            else:
+                                logger.info(
+                                    "  Smart trim: %s [%.1f-%.1fs] — no intermission "
+                                    "(conf=%.2f, ocr=%r)",
+                                    seg_name, s_s, e_s,
+                                    hit.get("max_conf", 0.0),
+                                    hit.get("ocr_text", "").replace("\n", " ").strip()[:60],
+                                )
+                    else:
+                        logger.info(
+                            "  Smart trim skipped (no pause_menu_template_end_of_game.png)"
+                        )
+
                     tagged_re: list[tuple[float, dict]] = []
                     for (start_s, end_s, seg) in seg_times:
                         if end_s > window_start and start_s < clip_end_abs:
                             seg["regulation_end"] = True
                             seg["clock_event"]    = "regulation_end"
                             tagged_re.append((start_s, seg))
+                            logger.info(
+                                "  Tagged regulation_end: %s  [t=%.1f–%.1fs]",
+                                Path(seg["path"]).name, start_s, end_s,
+                            )
                     if tagged_re:
                         tagged_re.sort(key=lambda x: x[0])
                         first_start_s, first_seg = tagged_re[0]
                         first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
                         first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
+                        logger.info(
+                            "  regulation_end lead trim: start=%.1fs end=%.1fs (within first segment)",
+                            first_seg["game_end_trim_start_s"], first_seg["game_end_trim_end_s"],
+                        )
                     logger.info(
-                        "Regulation-end (3RD buzzer) at t=%.1fs — tagged %d segment(s) [%.1fs, %.1fs] in %s",
+                        "Regulation-end (3RD buzzer) at t=%.1fs — tagged %d segment(s) "
+                        "final window [%.1fs, %.1fs] in %s",
                         ev_t, len(tagged_re), window_start, clip_end_abs, norm_clip.name,
                     )
 
@@ -481,20 +543,47 @@ def run_pipeline(
                 seg_times2.append((cum_t, cum_t + dur, seg))
                 cum_t += dur
 
-            vs_t = vs_detector.scan_video(norm_clip, interval_s=0.5, search_window_s=60.0)
-            if vs_t is None:
-                logger.info("  No VS screen found in %s", norm_clip.name)
-                continue
-
-            intro_start = vs_t + PRE_VS_SKIP_S
-
-            # Find game_start time from already-tagged segments
+            # Find game_start time from already-tagged segments so we can set
+            # a sensible search window for the VS screen scan.  The VS screen
+            # always appears before puck-drop, so searching up to game_start+120s
+            # covers any amount of pre-game franchise-mode menus.
             game_start_t: float | None = None
             for (start_s, end_s, seg) in seg_times2:
                 if seg.get("game_start"):
                     game_start_t = start_s
                     break
 
+            # Use game_start as the upper bound; fall back to full-video scan
+            # if clock detection didn't find a game_start for this clip.
+            if game_start_t is not None:
+                vs_search_window = game_start_t + 120.0
+                logger.info(
+                    "  VS search window: 0 – %.1fs (game_start=%.1fs + 120s buffer)",
+                    vs_search_window, game_start_t,
+                )
+            else:
+                import cv2 as _cv2_vs
+                _cap_vs = _cv2_vs.VideoCapture(str(norm_clip))
+                _fps_vs = _cap_vs.get(_cv2_vs.CAP_PROP_FPS) or 30.0
+                _n_vs   = _cap_vs.get(_cv2_vs.CAP_PROP_FRAME_COUNT)
+                _cap_vs.release()
+                vs_search_window = _n_vs / _fps_vs
+                logger.info(
+                    "  VS search window: full video (%.1fs) — no game_start detected",
+                    vs_search_window,
+                )
+
+            VS_SEARCH_START_S = 25.0  # skip first 25s to bypass the brief early VS appearance
+            vs_t = vs_detector.scan_video(
+                norm_clip, interval_s=0.5,
+                search_window_s=vs_search_window,
+                search_start_s=VS_SEARCH_START_S,
+            )
+            if vs_t is None:
+                logger.info("  No VS screen found in %s (searched %.1fs)", norm_clip.name, vs_search_window)
+                continue
+
+            intro_start = vs_t + PRE_VS_SKIP_S
             intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
 
             # Tag segments spanning [intro_start, intro_end) and record exact
@@ -532,8 +621,8 @@ def run_pipeline(
             threshold=0.60,
             sample_frames=6,
         )
-        PRE_EOG_S  = 60.0  # seconds before EOG screen to include (catches OT goal)
-        POST_EOG_S = 30.0  # seconds after EOG screen to include
+        PRE_EOG_S  = 10.0  # seconds before first EOG screen appearance to include
+        POST_EOG_S = 10.0  # seconds after first EOG screen appearance to include
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -562,7 +651,8 @@ def run_pipeline(
             # intermission or scoreboard overlays that superficially match.
             # OCR verification ensures the frame actually contains "END OF GAME"
             # text, not just a visually similar pause/intermission overlay.
-            eog_t: float | None = None
+            eog_t_first: float | None = None  # earliest confirmed EOG hit (start anchor)
+            eog_t: float | None = None             # latest confirmed EOG hit (end anchor)
             eog_conf: float = 0.0
             eog_name: str = ""
             for (start_s, end_s, seg) in seg_times_eog:
@@ -576,7 +666,9 @@ def run_pipeline(
                         "  END OF GAME candidate at ~t=%.1fs (conf=%.2f): %s",
                         cand_t, res["max_conf"], Path(seg["path"]).name,
                     )
-                    eog_t    = cand_t
+                    if eog_t_first is None:
+                        eog_t_first = cand_t  # record first occurrence
+                    eog_t    = cand_t          # overwrite → last occurrence
                     eog_conf = res["max_conf"]
                     eog_name = Path(seg["path"]).name
 
@@ -604,22 +696,39 @@ def run_pipeline(
                     seg.pop("game_end_trim_end_s", None)
                 _clip_regulation_end_t.pop(clip_stem, None)
 
-            # Clear stale game_end tags before re-tagging
+            # Clear stale game_end tags before re-tagging.
+            # Guard regulation_end-tagged segments — they share the same trim
+            # key names and must NOT have their trim stripped here.
             for (_, _, seg) in seg_times_eog:
+                if seg.get("regulation_end"):
+                    continue
                 seg.pop("game_end", None)
                 seg.pop("game_end_trim_start_s", None)
                 seg.pop("game_end_trim_end_s", None)
                 seg.pop("game_end_score", None)
 
-            # Tag game_end window: 60s before EOG through EOG+30s.
-            # Skips segments already claimed by the regulation_end clip so the
-            # 3RD-period buzzer moment stays as a separate highlight for OT games.
-            window_start = eog_t - PRE_EOG_S
-            clip_end_abs = eog_t + POST_EOG_S
+            # Tag game_end window: a tight window around the first EOG screen
+            # appearance so OT highlights remain as separate clips and post-game
+            # menu navigation is excluded.
+            # window_start = eog_t_first − PRE_EOG_S  (30s of pre-screen content)
+            # clip_end_abs = eog_t_first + POST_EOG_S (30s after screen first appears)
+            # Using eog_t_first (not eog_t_last) for both anchors ensures the
+            # clip shows the EOG screen appearing, not the player navigating menus.
+            _eog_anchor = eog_t_first if eog_t_first is not None else eog_t
+            window_start = _eog_anchor - PRE_EOG_S
+            clip_end_abs = _eog_anchor + POST_EOG_S
+            logger.info(
+                "  game_end window anchored to first EOG hit (t=%.1fs): [%.1fs, %.1fs]",
+                _eog_anchor, window_start, clip_end_abs,
+            )
             tagged = 0
             tagged_times_eog: list[tuple[float, dict]] = []
             for (start_s, end_s, seg) in seg_times_eog:
                 if seg.get("regulation_end"):
+                    logger.info(
+                        "  game_end skip (regulation_end): %s  [t=%.1f–%.1fs]",
+                        Path(seg["path"]).name, start_s, end_s,
+                    )
                     continue  # don't absorb the 3RD-buzzer clip into game_end
                 if end_s > window_start and start_s < clip_end_abs:
                     seg["game_end"]       = True
@@ -627,11 +736,19 @@ def run_pipeline(
                     seg["game_end_score"] = 1.0
                     tagged_times_eog.append((start_s, seg))
                     tagged += 1
+                    logger.info(
+                        "  Tagged game_end: %s  [t=%.1f–%.1fs]",
+                        Path(seg["path"]).name, start_s, end_s,
+                    )
             if tagged_times_eog:
                 tagged_times_eog.sort(key=lambda x: x[0])
                 first_start_s, first_seg = tagged_times_eog[0]
                 first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
                 first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
+                logger.info(
+                    "  game_end lead trim: start=%.1fs end=%.1fs (within first segment)",
+                    first_seg["game_end_trim_start_s"], first_seg["game_end_trim_end_s"],
+                )
             logger.info(
                 "Game-end clip: window=[%.1fs, %.1fs], %d segment(s) tagged",
                 window_start, clip_end_abs, tagged,

@@ -69,10 +69,11 @@ class VsScreenDetector:
         video_path: str | Path,
         interval_s: float = 0.5,
         search_window_s: float = 60.0,
+        search_start_s: float = 0.0,
     ) -> float | None:
         """
-        Scan the first *search_window_s* seconds of *video_path* for the VS
-        screen.
+        Scan *video_path* for the VS screen between *search_start_s* and
+        *search_window_s* seconds.
 
         Returns the timestamp in seconds of the first frame that exceeds the
         threshold, or ``None`` if not found.
@@ -80,11 +81,12 @@ class VsScreenDetector:
         Parameters
         ----------
         interval_s:
-            How often (seconds) to sample frames.  0.5 s is fine since the VS
-            screen is visible for several seconds.
+            How often (seconds) to sample frames.
         search_window_s:
-            Only scan this many seconds from the start (the VS screen always
-            appears before kick-off, so 60 s is more than enough).
+            Upper bound of the scan window in seconds.
+        search_start_s:
+            Skip this many seconds before starting the scan.  Useful when a
+            brief early VS-screen appearance should be ignored.
         """
         cap = cv2.VideoCapture(str(video_path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -92,7 +94,7 @@ class VsScreenDetector:
         max_t = min(search_window_s, total_frames / fps)
 
         step = max(1, int(fps * interval_s))
-        t = 0.0
+        t = max(0.0, search_start_s)
         result: float | None = None
 
         while t <= max_t:

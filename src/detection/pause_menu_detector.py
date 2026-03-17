@@ -64,7 +64,11 @@ class PauseMenuDetector:
             self._template.shape[1], self._template.shape[0], threshold,
         )
 
-    def detect(self, video_path: str | Path) -> dict:
+    def detect(
+        self,
+        video_path: str | Path,
+        require_ocr_text: list[str] | None = None,
+    ) -> dict:
         """
         Check whether the pause menu is visible in a video segment.
 
@@ -72,11 +76,18 @@ class PauseMenuDetector:
         matching against the top-left ROI of each.  Returns as soon as any
         frame clears the threshold (fast-exit for confirmed menu segments).
 
+        Args:
+            require_ocr_text:  When provided, the best-matching frame must also
+                contain at least one of these strings (case-insensitive) in its
+                OCR output, otherwise the detection is rejected.  Useful for
+                distinguishing END OF GAME from a regular pause menu.
+
         Returns:
             dict with keys:
               - ``detected``     bool — True if menu found
               - ``max_conf``     float — highest match confidence across frames
               - ``best_frame``   int  — 0-based frame index of best match
+              - ``ocr_text``     str  — OCR output of best frame (if checked)
         """
         video_path = Path(video_path)
         cap  = cv2.VideoCapture(str(video_path))
@@ -91,6 +102,7 @@ class PauseMenuDetector:
 
         indices = np.linspace(0, n - 1, self.sample_frames, dtype=int)
         max_conf, best_frame = 0.0, 0
+        best_frame_img = None
 
         for idx in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -105,15 +117,62 @@ class PauseMenuDetector:
             res  = cv2.matchTemplate(roi, self._template, cv2.TM_CCOEFF_NORMED)
             conf = float(res.max())
             if conf > max_conf:
-                max_conf, best_frame = conf, int(idx)
-            if conf >= self.threshold:
-                break  # fast-exit: confirmed
+                max_conf   = conf
+                best_frame = int(idx)
+                if require_ocr_text is not None:
+                    best_frame_img = frame.copy()
+            if conf >= self.threshold and require_ocr_text is None:
+                break  # fast-exit only when no OCR check needed
 
         cap.release()
-        detected = max_conf >= self.threshold
+
+        template_hit = max_conf >= self.threshold
+        ocr_text = ""
+
+        if template_hit and require_ocr_text is not None and best_frame_img is not None:
+            ocr_text = self._ocr_frame(best_frame_img, h, w)
+            upper = ocr_text.upper()
+            ocr_ok = any(tok.upper() in upper for tok in require_ocr_text)
+            if not ocr_ok:
+                logger.info(
+                    "EOG template hit in %s (conf=%.2f) rejected — OCR text %r "
+                    "does not contain %s",
+                    video_path.name, max_conf, ocr_text[:80], require_ocr_text,
+                )
+                template_hit = False
+
+        detected = template_hit
         if detected:
             logger.info(
                 "Pause menu detected in %s (conf=%.2f, t=%.1fs)",
                 video_path.name, max_conf, best_frame / fps,
             )
-        return {"detected": detected, "max_conf": max_conf, "best_frame": best_frame}
+        return {
+            "detected":   detected,
+            "max_conf":   max_conf,
+            "best_frame": best_frame,
+            "ocr_text":   ocr_text,
+        }
+
+    # ── OCR helper ────────────────────────────────────────────────────────────
+
+    def _ocr_frame(self, frame: np.ndarray, h: int, w: int) -> str:
+        """Run Tesseract on the top-half of *frame* and return the raw text."""
+        try:
+            import pytesseract
+        except ImportError:
+            logger.warning("pytesseract not installed — skipping OCR verification")
+            return ""
+        # Use a taller ROI than template matching so we catch text above/below
+        ocr_y2 = min(int(h * 0.45), h)
+        ocr_x2 = min(int(w * 0.60), w)
+        crop = frame[:ocr_y2, :ocr_x2]
+        # Upscale for better OCR accuracy on small HUD text
+        crop_up = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        gray    = cv2.cvtColor(crop_up, cv2.COLOR_BGR2GRAY)
+        text = pytesseract.image_to_string(
+            gray,
+            config="--psm 6 --oem 3",
+        )
+        logger.debug("EOG OCR text: %r", text[:120])
+        return text

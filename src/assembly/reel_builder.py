@@ -143,17 +143,29 @@ def build_reel(
         return output_path
 
     # intro and game_end groups are outside the max_clips limit.
+    # regulation_end groups are also structural — they mark the 3rd-period
+    # buzzer moment and must appear at their chronological position regardless
+    # of how many other highlights are in the reel.
     has_intro_group = bool(intro_segs) and groups and groups[0][0].get("intro")
     n_tail          = int(bool(game_end_segs))
     head_groups     = groups[:1] if has_intro_group else []
     tail_groups     = groups[len(groups) - n_tail:] if n_tail else []
     middle_groups   = groups[len(head_groups): len(groups) - n_tail]
-    selected_groups = head_groups + middle_groups[:max_clips] + tail_groups
+
+    # Separate structural middle groups (regulation_end, always included) from
+    # regular highlights that count toward max_clips.
+    structural_middle = [g for g in middle_groups if g[0].get("regulation_end")]
+    highlight_middle  = [g for g in middle_groups if not g[0].get("regulation_end")]
+    selected_highlights = highlight_middle[:max_clips]
+    # Re-merge maintaining original chronological order.
+    selected_middle = [g for g in middle_groups
+                       if g in selected_highlights or g in structural_middle]
+    selected_groups = head_groups + selected_middle + tail_groups
 
     logger.info(
-        "Building reel from %d groups (%d intro + %d highlights + %d game_end) …",
-        len(selected_groups), len(head_groups), len(middle_groups[:max_clips]),
-        int(bool(game_end_segs)),
+        "Building reel from %d groups (%d intro + %d structural + %d highlights + %d game_end) …",
+        len(selected_groups), len(head_groups), len(structural_middle),
+        len(selected_highlights), int(bool(game_end_segs)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
