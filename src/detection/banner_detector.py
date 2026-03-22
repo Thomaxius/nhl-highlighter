@@ -325,6 +325,130 @@ class BannerDetector:
         return best
 
 
+class AssistsBannerDetector:
+    """
+    Detects the "assists" banner that appears at the faceoff after a goal.
+
+    Same ROI as the GOAL banner (top-left HUD area).  Uses a single template
+    (configs/after_goal_assists_template.png) and a full-video scan identical
+    to ``BannerDetector.scan_video``.
+
+    Each detected timestamp means "a goal was scored ~10-25 s before this".
+    """
+
+    # The assists banner sits in the same top-left HUD zone as the GOAL banner
+    ASSISTS_ROI_X = 0.0
+    ASSISTS_ROI_Y = 0.0
+    ASSISTS_ROI_W = 0.55   # wider — the assists text + player name is ~950px
+    ASSISTS_ROI_H = 0.15
+
+    def __init__(
+        self,
+        template_path: str | Path | None = None,
+        threshold: float = 0.65,
+        scale_factors: list[float] | None = None,
+    ) -> None:
+        self.threshold = threshold
+        self.scale_factors = scale_factors or [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+        if template_path is None:
+            # Auto-discover any after_goal_assists_template*.png in configs/
+            candidates = sorted(Path("configs").glob("after_goal_assists_template*.png"))
+            if not candidates:
+                raise FileNotFoundError(
+                    "No assists banner templates found in configs/after_goal_assists_template*.png"
+                )
+            tp = candidates[-1]  # use the latest version
+        else:
+            tp = Path(template_path)
+        if not tp.exists():
+            raise FileNotFoundError(f"Assists banner template not found: {tp}")
+        img = cv2.imread(str(tp), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError(f"Could not read assists template image: {tp}")
+        self.template_gray = img
+        logger.info(
+            "AssistsBannerDetector loaded: %s (%dx%d), threshold=%.2f",
+            tp.name, img.shape[1], img.shape[0], threshold,
+        )
+
+    def scan_video(
+        self,
+        video_path: str | Path,
+        interval_s: float = 1.0,
+        merge_gap_s: float = 15.0,
+    ) -> list[float]:
+        """
+        Scan a normalised video for assists-banner frames.
+
+        Returns sorted list of timestamps (seconds) where the assists banner
+        was detected.  Consecutive hits within *merge_gap_s* are merged.
+        """
+        video_path = Path(video_path)
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        step = max(1, int(fps * interval_s))
+        indices = range(0, total_frames, step)
+        logger.info(
+            "AssistsBannerDetector: scanning %s — %d samples at %.1fs intervals",
+            video_path.name, len(indices), interval_s,
+        )
+
+        raw_times: list[float] = []
+        for i in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            conf = self._match_frame(frame)
+            if conf >= self.threshold:
+                t = i / fps
+                raw_times.append(t)
+                logger.info(
+                    "  Assists banner hit: t=%.2fs  frame=%d  conf=%.3f",
+                    t, i, conf,
+                )
+        cap.release()
+
+        merged: list[float] = []
+        for t in raw_times:
+            if not merged or t - merged[-1] > merge_gap_s:
+                merged.append(t)
+
+        logger.info(
+            "AssistsBannerDetector: %d raw hit(s) → %d merged assists event(s)",
+            len(raw_times), len(merged),
+        )
+        return merged
+
+    def _match_frame(self, frame: np.ndarray) -> float:
+        h, w = frame.shape[:2]
+        x1 = int(self.ASSISTS_ROI_X * w)
+        y1 = int(self.ASSISTS_ROI_Y * h)
+        x2 = int((self.ASSISTS_ROI_X + self.ASSISTS_ROI_W) * w)
+        y2 = int((self.ASSISTS_ROI_Y + self.ASSISTS_ROI_H) * h)
+        roi = frame[y1:y2, x1:x2]
+        roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        best = 0.0
+        for scale in self.scale_factors:
+            th, tw = self.template_gray.shape
+            new_w = int(tw * scale)
+            new_h = int(th * scale)
+            if new_w > roi_gray.shape[1] or new_h > roi_gray.shape[0]:
+                continue
+            scaled = cv2.resize(self.template_gray, (new_w, new_h))
+            result = cv2.matchTemplate(roi_gray, scaled, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            if max_val > best:
+                best = max_val
+            if best >= self.threshold:
+                break
+        return best
+
+
 def scan_segment_for_banner(
     video_path: str | Path,
     template_path: str | Path | list[str | Path] | None = None,

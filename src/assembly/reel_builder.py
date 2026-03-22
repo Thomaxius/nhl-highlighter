@@ -93,7 +93,7 @@ def build_reel(
             continue
         if seg not in filtered:
             continue
-        if seg.get("banner_detected"):
+        if seg.get("label") == "goal":
             # Start a goal group and collect chained follow-ups in order
             group = [seg]
             used_ids.add(id(seg))

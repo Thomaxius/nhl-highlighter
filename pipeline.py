@@ -22,7 +22,7 @@ from src.ingestion.ingest import ingest_clips
 from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
 from src.detection.classifier import HighlightClassifier
-from src.detection.banner_detector import BannerDetector
+from src.detection.banner_detector import BannerDetector, AssistsBannerDetector
 from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
 from src.detection.pause_menu_detector import PauseMenuDetector
@@ -38,20 +38,21 @@ logger = logging.getLogger("pipeline")
 
 def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     """
-    After a banner-detected goal segment, look ahead and tag the immediately
-    following celebration and replay segments so they are included in the reel
-    in the correct order: goal → celebration → replay.
+    After a goal segment (banner-detected or high-confidence classifier),
+    look ahead and tag the immediately following celebration and replay
+    segments so they are included in the reel in the correct order:
+    goal → celebration → replay.
 
     Stops chaining when:
     - An `other` segment appears that is longer than 10s (not just a transition flash)
-    - A second goal banner is detected
+    - A second goal is encountered
     - MAX_LOOKAHEAD segments have been checked
     """
     FOLLOW_LABELS = {"celebration", "goal_replay"}
     MAX_LOOKAHEAD = 10
     MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
 
-    goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected")]
+    goal_indices = [i for i, r in enumerate(results) if r.get("label") == "goal"]
 
     for goal_idx in goal_indices:
         g = results[goal_idx]
@@ -67,7 +68,7 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
             seg = results[next_idx]
 
             # Always stop at another goal
-            if seg.get("banner_detected"):
+            if seg.get("label") == "goal":
                 break
 
             if seg.get("label") in FOLLOW_LABELS:
@@ -127,7 +128,7 @@ def _chain_scoring_chance_sequences(results: list[dict]) -> list[dict]:
             seg = results[next_idx]
 
             # Stop at another goal or scoring chance
-            if seg.get("banner_detected") or seg.get("label") == "scoring_chance":
+            if seg.get("label") in {"goal", "scoring_chance"}:
                 break
 
             if seg.get("label") in FOLLOW_LABELS:
@@ -262,14 +263,29 @@ def run_pipeline(
             _timeline[norm_clip.stem] = {"times": _banner_times, "pre": PRE_GOAL_S, "post": POST_GOAL_S}
         return _timeline
 
-    logger.info("Running Steps 3 / 4 / 4b in parallel…")
-    with _cf.ThreadPoolExecutor(max_workers=3) as pool:
-        fut_audio  = pool.submit(_run_audio,    normalised, audio_dir)
-        fut_clf    = pool.submit(_run_classify,  all_segments, checkpoint)
-        fut_banner = pool.submit(_run_banner,    normalised)
-        all_spikes     = fut_audio.result()
-        results        = fut_clf.result()
-        banner_timeline = fut_banner.result()
+    def _run_assists(_normalised):
+        assists_tpls = sorted(Path("configs").glob("after_goal_assists_template*.png"))
+        if not assists_tpls:
+            logger.info("Skipping assists-banner detection (template not found)")
+            return {}
+        logger.info("━━━  Step 4b.5: Assists-banner detection  ━━━")
+        _det = AssistsBannerDetector()  # auto-discovers template
+        _timeline: dict = {}
+        for norm_clip in _normalised:
+            _times = _det.scan_video(norm_clip, interval_s=1.0)
+            _timeline[norm_clip.stem] = _times
+        return _timeline
+
+    logger.info("Running Steps 3 / 4 / 4b / 4b.5 in parallel…")
+    with _cf.ThreadPoolExecutor(max_workers=4) as pool:
+        fut_audio   = pool.submit(_run_audio,    normalised, audio_dir)
+        fut_clf     = pool.submit(_run_classify,  all_segments, checkpoint)
+        fut_banner  = pool.submit(_run_banner,    normalised)
+        fut_assists = pool.submit(_run_assists,   normalised)
+        all_spikes        = fut_audio.result()
+        results           = fut_clf.result()
+        banner_timeline   = fut_banner.result()
+        assists_timeline  = fut_assists.result()
     logger.info("Parallel steps complete.")
 
     # ── Step 4b (merge): apply banner timeline back onto results ──────────────
@@ -318,10 +334,14 @@ def run_pipeline(
     # ── Step 4c: Banner is the ground truth — hard override ──────────────────
     # If the GOAL! banner was detected, the segment IS a goal, period.
     # No ML confidence threshold can override a pixel-level HUD match.
-    # Conversely, demote any 'goal' label that has no banner and low confidence.
+    # High-confidence classifier goals (≥85%) are also trusted even without
+    # a banner — the HUD sometimes bugs out and never shows the GOAL text.
+    # Only demote low-confidence goal labels that lack banner confirmation.
+    GOAL_CONF_THRESHOLD = 0.85
     logger.info("━━━  Step 4c: Banner-gating goal labels  ━━━")
     demoted = 0
     promoted = 0
+    kept = 0
     for r in results:
         if r.get("banner_detected"):
             # Hard override regardless of what the classifier said
@@ -334,17 +354,186 @@ def run_pipeline(
             r["label"] = "goal"
             r["confidence"] = 1.0
         elif r.get("label") == "goal":
-            # No banner = no goal, regardless of model confidence
-            logger.info(
-                "  Demoted → other: %s (conf=%.0f%%, no banner)",
-                Path(r["path"]).name, r.get("confidence", 0) * 100,
-            )
-            r["label"] = "other"
-            demoted += 1
+            if r.get("confidence", 0) >= GOAL_CONF_THRESHOLD:
+                # High-confidence classifier goal — trust it without banner
+                logger.info(
+                    "  Kept high-conf goal (no banner): %s (conf=%.0f%%)",
+                    Path(r["path"]).name, r.get("confidence", 0) * 100,
+                )
+                kept += 1
+            else:
+                # Low confidence + no banner → demote
+                logger.info(
+                    "  Demoted → other: %s (conf=%.0f%%, no banner)",
+                    Path(r["path"]).name, r.get("confidence", 0) * 100,
+                )
+                r["label"] = "other"
+                demoted += 1
     if promoted:
         logger.info("  Promoted %d segment(s) to goal via banner detection.", promoted)
+    if kept:
+        logger.info("  Kept %d high-confidence goal(s) without banner (≥%.0f%%).", kept, GOAL_CONF_THRESHOLD * 100)
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
+
+    # ── Step 4c.5: Assists-banner backward recovery ──────────────────────
+    # When the GOAL banner glitches out, the assists banner at the next
+    # faceoff is our fallback.  For each assists-banner timestamp that has
+    # no nearby GOAL-banner-detected goal, walk backward through segments
+    # to find the most recent scoring_chance and promote it to a goal.
+    if assists_timeline:
+        logger.info("━━━  Step 4c.5: Assists-banner backward goal recovery  ━━━")
+        recovered = 0
+        for norm_clip in normalised:
+            clip_stem = norm_clip.stem
+            assists_times = assists_timeline.get(clip_stem)
+            if not assists_times:
+                continue
+
+            # Build cumulative timeline for this clip's segments
+            clip_segs = sorted(
+                [r for r in results if clip_stem in str(r["path"])],
+                key=lambda r: r["path"],
+            )
+            if not clip_segs:
+                continue
+            seg_ranges: list[tuple[float, float, dict, float]] = []
+            cum_t = 0.0
+            for seg in clip_segs:
+                _cap = _cv2.VideoCapture(str(seg["path"]))
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 30.0
+                _n   = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                _cap.release()
+                dur = _n / _fps
+                seg_ranges.append((cum_t, cum_t + dur, seg, _fps))
+                cum_t += dur
+
+            # Map each segment dict to its index in clip_segs for backward walk
+            seg_to_idx = {id(seg): i for i, seg in enumerate(clip_segs)}
+
+            LOOKBACK_S = 30.0  # goal happened at most 30s before assists banner
+
+            for at in assists_times:
+                # Check: is there already a banner-detected goal within LOOKBACK_S?
+                goal_nearby = False
+                for (start_s, end_s, seg, _) in seg_ranges:
+                    if seg.get("banner_detected") and (at - LOOKBACK_S) <= start_s <= at:
+                        goal_nearby = True
+                        break
+                if goal_nearby:
+                    logger.info(
+                        "  Assists at t=%.1fs — goal already detected nearby, skipping",
+                        at,
+                    )
+                    continue
+
+                # Find the segment that contains the assists-banner timestamp
+                assists_seg_idx: int | None = None
+                for (start_s, end_s, seg, _) in seg_ranges:
+                    if start_s <= at < end_s:
+                        assists_seg_idx = seg_to_idx[id(seg)]
+                        break
+                if assists_seg_idx is None:
+                    continue
+
+                # Walk backward from assists banner to find the scoring chance
+                # that was the actual goal.  Also accept celebration/goal_replay
+                # as waypoints but keep looking for scoring_chance.
+                goal_seg: dict | None = None
+                goal_seg_start_s: float | None = None
+                for k in range(assists_seg_idx - 1, -1, -1):
+                    seg_start_s = seg_ranges[k][0]
+                    if at - seg_start_s > LOOKBACK_S:
+                        break
+                    cand = clip_segs[k]
+                    if cand.get("label") == "scoring_chance":
+                        goal_seg = cand
+                        goal_seg_start_s = seg_start_s
+                        break
+                    # Skip over celebration / replay / short other segments
+                    if cand.get("label") in {"celebration", "goal_replay", "other_replay"}:
+                        continue
+                    if cand.get("label") == "other":
+                        dur = _get_clip_duration(cand["path"])
+                        if dur <= 5.0:
+                            continue  # short transition, keep looking
+                        break  # long other = unrelated content
+
+                if goal_seg is None:
+                    logger.info(
+                        "  Assists at t=%.1fs — no scoring_chance found in lookback window",
+                        at,
+                    )
+                    continue
+
+                # Promote the scoring_chance to a goal
+                goal_seg["banner_detected"]   = True
+                goal_seg["banner_confidence"] = 0.90
+                goal_seg["assists_recovered"] = True
+                goal_seg["label"]      = "goal"
+                goal_seg["confidence"] = 1.0
+                recovered += 1
+                logger.info(
+                    "  RECOVERED goal via assists banner: assists t=%.1fs → %s (was scoring_chance at t=%.1fs)",
+                    at, Path(goal_seg["path"]).name, goal_seg_start_s,
+                )
+
+        if recovered:
+            logger.info("  Recovered %d missed goal(s) via assists-banner detection.", recovered)
+    else:
+        logger.info("Skipping assists-banner recovery (no assists timeline)")
+
+    # ── Step 4c.8: Pattern-confirmed goal recovery ───────────────────────────
+    # Last chance: if a segment was classifier-labeled 'goal' with high
+    # confidence but demoted by Step 4c (no banner), check whether the
+    # following segments form a goal-like pattern (celebration / goal_replay).
+    # If so, the classifier was right — the HUD just bugged out.
+    logger.info("━━━  Step 4c.8: Pattern-confirmed goal recovery  ━━━")
+    PATTERN_MIN_CONF = 0.75  # original classifier confidence needed
+    PATTERN_FOLLOW = {"celebration", "goal_replay"}
+    pattern_recovered = 0
+    for i, r in enumerate(results):
+        # Only look at segments that were demoted from goal to other in Step 4c
+        if r.get("label") != "other" or not r.get("scores"):
+            continue
+        orig_goal_conf = r["scores"].get("goal", 0.0)
+        if orig_goal_conf < PATTERN_MIN_CONF:
+            continue
+        # Already recovered by another method
+        if r.get("banner_detected"):
+            continue
+
+        # Look ahead for celebration or goal_replay within the next few segments
+        found_pattern = False
+        for j in range(1, 6):
+            nxt_idx = i + j
+            if nxt_idx >= len(results):
+                break
+            nxt = results[nxt_idx]
+            if nxt.get("label") in PATTERN_FOLLOW:
+                found_pattern = True
+                break
+            if nxt.get("label") == "other":
+                dur = _get_clip_duration(nxt["path"])
+                if dur > 5.0:
+                    break  # long gap = unrelated
+
+        if found_pattern:
+            r["banner_detected"]     = True
+            r["banner_confidence"]   = orig_goal_conf
+            r["pattern_recovered"]   = True
+            r["label"]      = "goal"
+            r["confidence"] = orig_goal_conf
+            pattern_recovered += 1
+            logger.info(
+                "  PATTERN RECOVERED goal: %s (orig_goal_conf=%.0f%%, "
+                "followed by %s)",
+                Path(r["path"]).name, orig_goal_conf * 100,
+                results[nxt_idx]["label"],
+            )
+
+    if pattern_recovered:
+        logger.info("  Pattern-recovered %d goal(s) via celebration/replay sequence.", pattern_recovered)
 
     # ── Step 4d: Game clock detection (period / game end) ──────────────────
     # Scans the raw video for 0:00 (regulation_end) and 0:01 (period end) clock
@@ -588,10 +777,18 @@ def run_pipeline(
 
             # Tag segments spanning [intro_start, intro_end) and record exact
             # trim offsets on the first tagged segment for the reel builder.
+            # Never absorb a banner-detected goal into the intro — it must stay
+            # as its own highlight group.
             tagged = 0
             first_intro_seg_start: float | None = None
             for (start_s, end_s, seg) in seg_times2:
                 if end_s > intro_start and start_s < intro_end:
+                    if seg.get("banner_detected"):
+                        logger.info(
+                            "  Intro skip (banner-detected goal): %s [%.1f–%.1fs]",
+                            Path(seg["path"]).name, start_s, end_s,
+                        )
+                        continue
                     seg["intro"] = True
                     tagged += 1
                     if first_intro_seg_start is None:
