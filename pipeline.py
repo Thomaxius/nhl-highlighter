@@ -703,12 +703,12 @@ def run_pipeline(
     # Tagged segments carry trim offsets so the reel builder can cut precisely:
     #   intro_clip_start_s — seconds from the first tagged segment's start
     #   intro_clip_end_s   — seconds from the first tagged segment's start
-    vs_template = Path("configs/vs_screen_template.png")
+    vs_templates = sorted(Path("configs").glob("vs_screen_template*.png"))
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
-    if vs_template.exists():
+    if vs_templates:
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
-        vs_detector = VsScreenDetector(template_path=vs_template)
+        vs_detector = VsScreenDetector(template_path=vs_templates[0])
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -762,15 +762,34 @@ def run_pipeline(
                     vs_search_window,
                 )
 
-            VS_SEARCH_START_S = 25.0  # skip first 25s to bypass the brief early VS appearance
-            vs_t = vs_detector.scan_video(
-                norm_clip, interval_s=0.5,
+            vs_hits = vs_detector.find_matches(
+                norm_clip,
+                interval_s=0.5,
                 search_window_s=vs_search_window,
-                search_start_s=VS_SEARCH_START_S,
+                search_start_s=0.0,
             )
-            if vs_t is None:
+            if not vs_hits:
                 logger.info("  No VS screen found in %s (searched %.1fs)", norm_clip.name, vs_search_window)
                 continue
+
+            vs_clusters: list[list[tuple[float, float]]] = []
+            for hit_t, hit_conf in vs_hits:
+                if not vs_clusters or (hit_t - vs_clusters[-1][-1][0]) > 1.0:
+                    vs_clusters.append([(hit_t, hit_conf)])
+                else:
+                    vs_clusters[-1].append((hit_t, hit_conf))
+
+            chosen_cluster = vs_clusters[0]
+
+            vs_t = chosen_cluster[0][0]
+            vs_peak_conf = max(conf for _, conf in chosen_cluster)
+            logger.info(
+                "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s))",
+                chosen_cluster[0][0],
+                chosen_cluster[-1][0],
+                vs_peak_conf,
+                len(chosen_cluster),
+            )
 
             intro_start = vs_t + PRE_VS_SKIP_S
             intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
@@ -803,7 +822,7 @@ def run_pipeline(
                 PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
             )
     else:
-        logger.info("Skipping VS screen detection (configs/vs_screen_template.png not found)")
+        logger.info("Skipping VS screen detection (configs/vs_screen_template*.png not found)")
 
     # ── Step 4d.8: END OF GAME screen detection ────────────────────────────────
     # The END OF GAME scoreboard overlay is the most reliable signal for where
