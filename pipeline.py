@@ -706,9 +706,16 @@ def run_pipeline(
     vs_templates = sorted(Path("configs").glob("vs_screen_template*.png"))
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
+    FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
     if vs_templates:
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
         vs_detector = VsScreenDetector(template_path=vs_templates[0])
+        fallback_pause_template = Path("configs/pause_menu_template.png")
+        fallback_pause_detector = (
+            PauseMenuDetector(template_path=fallback_pause_template)
+            if fallback_pause_template.exists() else None
+        )
+        fallback_pause_cache: dict[str, bool] = {}
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -769,30 +776,60 @@ def run_pipeline(
                 search_start_s=0.0,
             )
             if not vs_hits:
-                logger.info("  No VS screen found in %s (searched %.1fs)", norm_clip.name, vs_search_window)
-                continue
+                fallback_seg = None
+                for (start_s, end_s, seg) in seg_times2:
+                    if seg.get("label") != "other":
+                        continue
+                    if fallback_pause_detector is not None:
+                        seg_path = str(seg["path"])
+                        is_pause = fallback_pause_cache.get(seg_path)
+                        if is_pause is None:
+                            is_pause = fallback_pause_detector.detect(seg["path"])["detected"]
+                            fallback_pause_cache[seg_path] = is_pause
+                        if is_pause:
+                            logger.info(
+                                "  Fallback intro skip (pause menu): %s [t=%.1f–%.1fs]",
+                                Path(seg["path"]).name, start_s, end_s,
+                            )
+                            continue
+                    fallback_seg = (start_s, end_s, seg)
+                    break
+                if fallback_seg is None:
+                    logger.info(
+                        "  No VS screen found in %s (searched %.1fs) and no 'other' fallback segment is available",
+                        norm_clip.name, vs_search_window,
+                    )
+                    continue
+                intro_mode = "fallback"
+                intro_start = fallback_seg[0]
+                intro_end = min(cum_t, intro_start + FALLBACK_INTRO_S)
+                logger.info(
+                    "  No VS screen found in %s (searched %.1fs) — fallback to first 'other' at t=%.1fs for %.1fs",
+                    norm_clip.name, vs_search_window, intro_start, FALLBACK_INTRO_S,
+                )
+            else:
+                vs_clusters: list[list[tuple[float, float]]] = []
+                for hit_t, hit_conf in vs_hits:
+                    if not vs_clusters or (hit_t - vs_clusters[-1][-1][0]) > 1.0:
+                        vs_clusters.append([(hit_t, hit_conf)])
+                    else:
+                        vs_clusters[-1].append((hit_t, hit_conf))
 
-            vs_clusters: list[list[tuple[float, float]]] = []
-            for hit_t, hit_conf in vs_hits:
-                if not vs_clusters or (hit_t - vs_clusters[-1][-1][0]) > 1.0:
-                    vs_clusters.append([(hit_t, hit_conf)])
-                else:
-                    vs_clusters[-1].append((hit_t, hit_conf))
+                chosen_cluster = vs_clusters[0]
 
-            chosen_cluster = vs_clusters[0]
+                vs_t = chosen_cluster[0][0]
+                vs_peak_conf = max(conf for _, conf in chosen_cluster)
+                logger.info(
+                    "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s))",
+                    chosen_cluster[0][0],
+                    chosen_cluster[-1][0],
+                    vs_peak_conf,
+                    len(chosen_cluster),
+                )
 
-            vs_t = chosen_cluster[0][0]
-            vs_peak_conf = max(conf for _, conf in chosen_cluster)
-            logger.info(
-                "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s))",
-                chosen_cluster[0][0],
-                chosen_cluster[-1][0],
-                vs_peak_conf,
-                len(chosen_cluster),
-            )
-
-            intro_start = vs_t + PRE_VS_SKIP_S
-            intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
+                intro_mode = "vs"
+                intro_start = vs_t + PRE_VS_SKIP_S
+                intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
 
             # Tag segments spanning [intro_start, intro_end) and record exact
             # trim offsets on the first tagged segment for the reel builder.
@@ -816,11 +853,18 @@ def run_pipeline(
                         seg["intro_clip_start_s"] = max(0.0, intro_start - start_s)
                         seg["intro_clip_end_s"]   = intro_end - start_s
 
-            logger.info(
-                "Intro: VS+%.0fs (t=%.1fs) → game_start+%.0fs (t=%.1fs): "
-                "tagged %d segment(s)",
-                PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
-            )
+            if intro_mode == "vs":
+                logger.info(
+                    "Intro: VS+%.0fs (t=%.1fs) → game_start+%.0fs (t=%.1fs): "
+                    "tagged %d segment(s)",
+                    PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
+                )
+            else:
+                logger.info(
+                    "Fallback intro: first 'other' [t=%.1fs] → +%.0fs (t=%.1fs): "
+                    "tagged %d segment(s)",
+                    intro_start, FALLBACK_INTRO_S, intro_end, tagged,
+                )
     else:
         logger.info("Skipping VS screen detection (configs/vs_screen_template*.png not found)")
 
