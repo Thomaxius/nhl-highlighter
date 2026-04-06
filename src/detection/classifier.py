@@ -14,7 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Labels must match the order used during training.
-DEFAULT_LABELS = ["goal", "celebration", "goal_replay", "other_replay", "scoring_chance", "other"]
+DEFAULT_LABELS = ["goal", "celebration", "goal_replay", "other_replay", "scoring_chance", "faceoff_cutscene", "faceoff", "other"]
 
 
 class HighlightClassifier:
@@ -44,33 +44,107 @@ class HighlightClassifier:
     # Public API
     # ------------------------------------------------------------------
 
+    # Clips longer than this (seconds) get sliding-window inference so a short
+    # goal moment at the end of a long scene isn't drowned out by uniform sampling.
+    WINDOW_THRESHOLD_S = 10.0
+    WINDOW_SIZE_S      = 4.0   # match typical training clip length
+    WINDOW_STRIDE_S    = 2.0   # 50 % overlap
+
     def classify_segment(self, video_path: str | Path) -> dict:
         """
         Classify a single video segment.
 
+        For clips longer than WINDOW_THRESHOLD_S, runs the model over overlapping
+        windows matching training clip length and takes the highest-confidence
+        non-other prediction (or best other if everything else is low).
+
         Returns:
             {"path": str, "label": str, "confidence": float, "scores": dict}
         """
-        frames = self._load_frames(Path(video_path))
+        import cv2 as _cv2
+        path = Path(video_path)
+        cap = _cv2.VideoCapture(str(path))
+        fps = cap.get(_cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        duration_s = total_frames / fps
+
+        if duration_s > self.WINDOW_THRESHOLD_S:
+            return self._classify_windowed(path, fps, total_frames, duration_s)
+
+        return self._classify_frames(path, self._load_frames(path))
+
+    def _classify_frames(self, video_path: Path, frames) -> dict:
+        """Run a single model forward pass on a pre-loaded frame list."""
         if frames is None:
             return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
 
         inputs = self.processor(images=frames, return_tensors="pt").to(self.device)
-
         with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
+            probs = torch.softmax(self.model(**inputs).logits, dim=-1)[0].cpu().numpy()
 
         best_idx = int(np.argmax(probs))
-        scores = {label: float(probs[i]) for i, label in enumerate(self.labels)}
-
         return {
             "path": str(video_path),
             "label": self.labels[best_idx],
             "confidence": float(probs[best_idx]),
-            "scores": scores,
+            "scores": {label: float(probs[i]) for i, label in enumerate(self.labels)},
         }
+
+    def _classify_windowed(self, video_path: Path, fps: float, total_frames: int, duration_s: float) -> dict:
+        """
+        Slide a fixed-length window over a long clip and return the prediction
+        with the highest non-other confidence.  Falls back to the best overall
+        prediction if every window confidently says 'other'.
+        """
+        import cv2 as _cv2
+
+        window_frames_n = int(self.WINDOW_SIZE_S * fps)
+        stride_frames_n = int(self.WINDOW_STRIDE_S * fps)
+        window_frames_n = max(window_frames_n, self.num_frames)  # must have enough frames to sample
+
+        cap = _cv2.VideoCapture(str(video_path))
+
+        best_result = None         # best non-other result
+        best_other_result = None   # fallback if every window says other
+
+        start = 0
+        while start < total_frames:
+            end = min(start + window_frames_n, total_frames)
+            indices = np.linspace(start, end - 1, self.num_frames, dtype=int)
+            frames = []
+            for idx in indices:
+                cap.set(_cv2.CAP_PROP_POS_FRAMES, int(idx))
+                ret, frame = cap.read()
+                if ret:
+                    frame = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+                    frame = _cv2.resize(frame, (224, 224))
+                    frames.append(frame)
+
+            if len(frames) == self.num_frames:
+                result = self._classify_frames(video_path, frames)
+                if result["label"] != "other":
+                    if best_result is None or result["confidence"] > best_result["confidence"]:
+                        best_result = result
+                else:
+                    if best_other_result is None or result["confidence"] > best_other_result["confidence"]:
+                        best_other_result = result
+
+            if end >= total_frames:
+                break
+            start += stride_frames_n
+
+        cap.release()
+
+        winner = best_result if best_result is not None else best_other_result
+        if winner is None:
+            return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
+
+        logger.debug(
+            "  Windowed inference: %s → %s (%.0f%%) over %.1fs",
+            video_path.name, winner["label"], winner["confidence"] * 100, duration_s,
+        )
+        return winner
 
     def classify_segments(self, video_paths: list[Path]) -> list[dict]:
         """Classify a list of segment paths and return results."""
