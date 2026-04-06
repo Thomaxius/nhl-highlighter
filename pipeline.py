@@ -364,17 +364,17 @@ def run_pipeline(
 
             clock_events = clock_detector.scan_video(norm_clip)
 
-            # If multiple game_end events were detected (e.g. a false clock read
-            # mid-game and the real final buzzer), only keep the last one so the
-            # reel trim offsets are calculated from the true game-ending 0:00.
-            game_end_events = [e for e in clock_events if e["event"] == "game_end"]
-            if len(game_end_events) > 1:
-                logger.info(
-                    "Multiple game_end events detected (%d); keeping only the last (t=%.1fs)",
-                    len(game_end_events), game_end_events[-1]["time_s"],
-                )
-                clock_events = [e for e in clock_events if e["event"] != "game_end"] + [game_end_events[-1]]
-                clock_events.sort(key=lambda e: e["time_s"])
+            # If multiple game_end/regulation_end events were detected, only keep
+            # the last one so trim offsets are from the true final buzzer.
+            for terminal_type in ("game_end", "regulation_end"):
+                terminal_events = [e for e in clock_events if e["event"] == terminal_type]
+                if len(terminal_events) > 1:
+                    logger.info(
+                        "Multiple %s events detected (%d); keeping only the last (t=%.1fs)",
+                        terminal_type, len(terminal_events), terminal_events[-1]["time_s"],
+                    )
+                    clock_events = [e for e in clock_events if e["event"] != terminal_type] + [terminal_events[-1]]
+                    clock_events.sort(key=lambda e: e["time_s"])
 
             for ev in clock_events:
                 ev_t   = ev["time_s"]
@@ -404,6 +404,29 @@ def run_pipeline(
                         first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
                     logger.info(
                         "Game-end at t=%.1fs: tagged %d segment(s) covering final %.0fs + %.0fs post",
+                        ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t), POST_GAME_END_S,
+                    )
+
+                elif ev_type == "regulation_end":
+                    # 3rd period final buzzer — tag segments covering the final
+                    # FINAL_SECONDS_WINDOW before the buzzer + POST_GAME_END_S after.
+                    window_start = ev_t - FINAL_SECONDS_WINDOW
+                    clip_end_abs = ev_t + POST_GAME_END_S
+                    tagged       = 0
+                    tagged_times_re: list[tuple[float, dict]] = []
+                    for (start_s, end_s, seg) in seg_times:
+                        if end_s > window_start and start_s < clip_end_abs:
+                            seg["regulation_end"] = True
+                            seg["clock_event"]    = ev_type
+                            tagged_times_re.append((start_s, seg))
+                            tagged += 1
+                    if tagged_times_re:
+                        tagged_times_re.sort(key=lambda x: x[0])
+                        first_start_s, first_seg = tagged_times_re[0]
+                        first_seg["game_end_trim_start_s"] = max(0.0, window_start - first_start_s)
+                        first_seg["game_end_trim_end_s"]   = clip_end_abs - first_start_s
+                    logger.info(
+                        "Regulation-end at t=%.1fs: tagged %d segment(s) covering final %.0fs + %.0fs post",
                         ev_t, tagged, min(FINAL_SECONDS_WINDOW, ev_t), POST_GAME_END_S,
                     )
 
