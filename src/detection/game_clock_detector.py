@@ -129,6 +129,17 @@ class GameClockDetector:
                 "Install it: pip install pytesseract"
             )
 
+        # On Windows, Tesseract is often not on PATH even if installed.
+        # Auto-detect the default UB-Mannheim install location.
+        import sys, os
+        if sys.platform == "win32":
+            import pytesseract as _pt
+            if not _pt.get_tesseract_version:
+                pass  # already configured
+            default_win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if os.path.exists(default_win_path) and not os.path.isabs(_pt.pytesseract.tesseract_cmd):
+                _pt.pytesseract.tesseract_cmd = default_win_path
+
         video_path = Path(video_path)
         cap = cv2.VideoCapture(str(video_path))
         fps     = cap.get(cv2.CAP_PROP_FPS) or 30.0
