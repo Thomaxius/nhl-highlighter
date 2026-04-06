@@ -572,16 +572,25 @@ def run_pipeline(
                     else:
                         vs_clusters[-1].append((hit_t, hit_conf))
 
-                chosen_cluster = vs_clusters[0]
+                # Use the LAST cluster before game_start — handles the case
+                # where the user visited the VS matchup menu and backed out
+                # (early false hit) before committing to the game (late true hit).
+                # If game_start is unknown, fall back to the last cluster overall.
+                if game_start_t is not None:
+                    valid_clusters = [c for c in vs_clusters if c[0][0] < game_start_t]
+                    chosen_cluster = valid_clusters[-1] if valid_clusters else vs_clusters[-1]
+                else:
+                    chosen_cluster = vs_clusters[-1]
 
                 vs_t = chosen_cluster[0][0]
                 vs_peak_conf = max(conf for _, conf in chosen_cluster)
                 logger.info(
-                    "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s))",
+                    "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s), %d total cluster(s))",
                     chosen_cluster[0][0],
                     chosen_cluster[-1][0],
                     vs_peak_conf,
                     len(chosen_cluster),
+                    len(vs_clusters),
                 )
 
                 intro_mode = "vs"
