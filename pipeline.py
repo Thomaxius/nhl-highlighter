@@ -57,20 +57,21 @@ def _setup_file_logging(output_path) -> Path:
 
 def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     """
-    After a banner-detected goal segment, look ahead and tag the immediately
-    following celebration and replay segments so they are included in the reel
-    in the correct order: goal → celebration → replay.
+    After a banner-detected or faceoff-inferred goal segment, look ahead and
+    tag the immediately following celebration and replay segments so they are
+    included in the reel in order: goal → celebration → replay.
 
     Stops chaining when:
+    - A faceoff_cutscene or faceoff segment is reached (goal sequence is over)
     - An `other` segment appears that is longer than 10s (not just a transition flash)
-    - A second goal banner is detected
+    - A second goal is detected
     - MAX_LOOKAHEAD segments have been checked
     """
     FOLLOW_LABELS = {"celebration", "goal_replay"}
     MAX_LOOKAHEAD = 10
     MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
 
-    goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected")]
+    goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected") or r.get("inferred_goal")]
 
     for goal_idx in goal_indices:
         g = results[goal_idx]
@@ -86,7 +87,12 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
             seg = results[next_idx]
 
             # Always stop at another goal
-            if seg.get("banner_detected"):
+            if seg.get("banner_detected") or seg.get("inferred_goal"):
+                break
+
+            # Faceoff sequence means the goal chain is over
+            if seg.get("label") in {"faceoff_cutscene", "faceoff"}:
+                logger.info("  Chain stopped \u2014 faceoff sequence: %s", Path(seg["path"]).name)
                 break
 
             if seg.get("label") in FOLLOW_LABELS:
@@ -124,6 +130,61 @@ def _get_clip_duration(video_path) -> float:
     cap.release()
     return frames / fps
 
+
+def _infer_goals_from_faceoff_pattern(results: list[dict]) -> list[dict]:
+    """
+    Infer goals from the post-goal sequence when banner detection fails.
+
+    After a real goal, the game always transitions to:
+        (celebration) → (replay) → faceoff_cutscene → faceoff
+
+    If a `scoring_chance` segment (or a segment the ML labelled `goal` but
+    banner-gating demoted to `other`) is followed by `faceoff_cutscene`
+    within the lookahead window, it is promoted to `goal` (inferred_goal=True).
+    These inferred goals are then chained by _chain_goal_sequences.
+    """
+    MAX_LOOKAHEAD = 15
+
+    promoted = 0
+    for i, seg in enumerate(results):
+        # Skip already-confirmed goals
+        if seg.get("banner_detected") or seg.get("inferred_goal"):
+            continue
+        # Candidate: ML thought this was a goal or scoring chance
+        ml = seg.get("ml_label", seg.get("label"))
+        if ml not in {"goal", "scoring_chance"}:
+            continue
+        if seg.get("label") not in {"scoring_chance", "other"}:
+            continue
+
+        for j in range(1, MAX_LOOKAHEAD + 1):
+            next_idx = i + j
+            if next_idx >= len(results):
+                break
+            nxt = results[next_idx]
+
+            # faceoff_cutscene = normal post-goal sequence
+            # faceoff directly = player skipped the cutscene
+            if nxt.get("label") in {"faceoff_cutscene", "faceoff"}:
+                seg["label"] = "goal"
+                seg["inferred_goal"] = True
+                seg["confidence"] = max(seg.get("confidence", 0.0), 0.90)
+                seg["score"] = max(seg.get("score", seg["confidence"]), 0.90)
+                trigger = nxt.get("label")
+                logger.info(
+                    "  Faceoff-pattern goal inferred: %s  ml=%s conf=%.0f%%  (%s at +%d)",
+                    Path(seg["path"]).name, ml, seg["confidence"] * 100, trigger, j,
+                )
+                promoted += 1
+                break
+
+            # Stop scanning if we hit a confirmed goal (new sequence)
+            if nxt.get("banner_detected") or nxt.get("label") == "goal":
+                break
+
+    if promoted:
+        logger.info("  Inferred %d goal(s) from faceoff pattern.", promoted)
+    return results
 
 
 def run_pipeline(
@@ -234,6 +295,10 @@ def run_pipeline(
     # If the GOAL! banner was detected, the segment IS a goal, period.
     # No ML confidence threshold can override a pixel-level HUD match.
     # Conversely, demote any 'goal' label that has no banner and low confidence.
+    # Save each segment's raw ML label before any overrides so that
+    # faceoff-pattern inference can still act on originally-goal-labelled segments.
+    for r in results:
+        r["ml_label"] = r.get("label")
     logger.info("━━━  Step 4c: Banner-gating goal labels  ━━━")
     demoted = 0
     promoted = 0
@@ -260,6 +325,10 @@ def run_pipeline(
         logger.info("  Promoted %d segment(s) to goal via banner detection.", promoted)
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
+
+    # ── Step 4c.5: Infer goals from faceoff pattern (handles banner failures) ─
+    logger.info("\u2501\u2501\u2501  Step 4c.5: Faceoff-pattern goal inference  \u2501\u2501\u2501")
+    results = _infer_goals_from_faceoff_pattern(results)
 
     # ── Step 4d: Game clock detection (period / game end) ──────────────────
     # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
