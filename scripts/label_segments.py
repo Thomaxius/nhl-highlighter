@@ -14,7 +14,8 @@ Controls
     g → goal        c → celebration
     r → goal_replay (slow-mo replay after a goal)
     n → other_replay (cutscene / non-goal replay)
-    s → scoring_chance               t → transition
+    s → scoring_chance
+    f → faceoff      z → faceoff_cutscene
     o → other
     SPACE → skip    q → quit
 """
@@ -31,7 +32,8 @@ KEYMAP = {
     "r": "goal_replay",
     "n": "other_replay",
     "s": "scoring_chance",
-    "t": "transition",
+    "f": "faceoff",
+    "z": "faceoff_cutscene",
     "o": "other",
 }
 

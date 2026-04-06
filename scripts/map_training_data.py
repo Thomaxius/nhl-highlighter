@@ -36,12 +36,13 @@ LABEL_MAP = {
     "goal":                  "goal",
     "close_goal":            "scoring_chance",
     "good_scoring_chance":   "scoring_chance",
+    "scoring_chance":        "scoring_chance",
     "celebration":           "celebration",
     "replay":                "goal_replay",
     "hit_replay":            "other_replay",
     "closecall_replay":      "other_replay",
-    "faceoff":               "other",
-    "faceoff_cutscene":      "other_replay",
+    "faceoff":               "faceoff",
+    "faceoff_cutscene":      "faceoff_cutscene",
     "hit":                   "other",
     "coach_reactions":       "other_replay",
     "referee_cutscene":      "other_replay",
@@ -53,7 +54,6 @@ LABEL_MAP = {
     "ejection_cutscene":     "other_replay",
     # Discarded
     "offensive_zone":        None,   # replaced by good_scoring_chance
-    "scoring_chance":        None,   # uncurated — discard this round
     "transition":            None,   # sub-second clips — unreliable for VideoMAE
     "empty_net_cutscene":    None,   # 0 clips
     "combine_clips":         None,   # utility folder, not training data
@@ -62,9 +62,7 @@ LABEL_MAP = {
 
 # Per-folder clip cap (applied before the global max_other cap).
 # Use this to include only a fraction of a large folder.
-FOLDER_CAP = {
-    "faceoff_cutscene": 50,   # ~1/3 of 152
-}
+FOLDER_CAP: dict = {}
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
