@@ -52,6 +52,7 @@ LABEL_MAP = {
     "misc_cutscene":         "other_replay",
     "other":                 "other",
     "ejection_cutscene":     "other_replay",
+    "ea_transition":         "other",
     # Discarded
     "offensive_zone":        None,   # replaced by good_scoring_chance
     "transition":            None,   # sub-second clips — unreliable for VideoMAE
