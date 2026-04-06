@@ -42,18 +42,26 @@ class VsScreenDetector:
         threshold: float = MIN_CONF,
     ) -> None:
         template_path = Path(template_path)
-        if not template_path.exists():
+        self.template_paths = self._resolve_template_paths(template_path)
+        if not self.template_paths:
             raise FileNotFoundError(
                 f"VS screen template not found: {template_path}\n"
                 "Run the extraction step first or check configs/."
             )
-        self.template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
-        if self.template is None:
-            raise ValueError(f"Could not read template: {template_path}")
+        self.templates: list[np.ndarray] = []
+        for path in self.template_paths:
+            template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if template is None:
+                raise ValueError(f"Could not read template: {path}")
+            self.templates.append(template)
         self.threshold = threshold
-        logger.debug(
-            "VsScreenDetector ready — template %dx%d, threshold %.2f",
-            self.template.shape[1], self.template.shape[0], threshold,
+        sizes = ", ".join(
+            f"{path.name}={template.shape[1]}x{template.shape[0]}"
+            for path, template in zip(self.template_paths, self.templates, strict=True)
+        )
+        logger.info(
+            "VsScreenDetector ready — %d template(s), threshold %.2f (%s)",
+            len(self.templates), threshold, sizes,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -63,6 +71,52 @@ class VsScreenDetector:
     def match_frame(self, frame: np.ndarray) -> float:
         """Return template-match confidence for a single frame (0–1)."""
         return self._conf(frame)
+
+    def find_matches(
+        self,
+        video_path: str | Path,
+        interval_s: float = 0.5,
+        search_window_s: float = 60.0,
+        search_start_s: float = 0.0,
+    ) -> list[tuple[float, float]]:
+        """
+        Return all sampled timestamps that exceed the configured threshold.
+
+        Each result is ``(timestamp_s, confidence)``.
+        """
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        max_t = min(search_window_s, total_frames / fps)
+
+        t = max(0.0, search_start_s)
+        matches: list[tuple[float, float]] = []
+        best_conf = float("-inf")
+        best_t = t
+
+        while t <= max_t:
+            frame_idx = int(t * fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            conf = self._conf(frame)
+            if conf > best_conf:
+                best_conf = conf
+                best_t = t
+            if conf >= self.threshold:
+                matches.append((t, conf))
+
+            t += interval_s
+
+        cap.release()
+        if not matches and best_conf != float("-inf"):
+            logger.info(
+                "VS screen not detected in %s — best conf=%.3f at t=%.2fs (threshold %.2f)",
+                Path(video_path).name, best_conf, best_t, self.threshold,
+            )
+        return matches
 
     def scan_video(
         self,
@@ -88,35 +142,21 @@ class VsScreenDetector:
             Skip this many seconds before starting the scan.  Useful when a
             brief early VS-screen appearance should be ignored.
         """
-        cap = cv2.VideoCapture(str(video_path))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        max_t = min(search_window_s, total_frames / fps)
+        matches = self.find_matches(
+            video_path,
+            interval_s=interval_s,
+            search_window_s=search_window_s,
+            search_start_s=search_start_s,
+        )
+        if not matches:
+            return None
 
-        step = max(1, int(fps * interval_s))
-        t = max(0.0, search_start_s)
-        result: float | None = None
-
-        while t <= max_t:
-            frame_idx = int(t * fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            conf = self._conf(frame)
-            if conf >= self.threshold:
-                logger.info(
-                    "VS screen detected at t=%.2fs  conf=%.3f  (%s)",
-                    t, conf, Path(video_path).name,
-                )
-                result = t
-                break
-
-            t += interval_s
-
-        cap.release()
-        return result
+        t, conf = matches[0]
+        logger.info(
+            "VS screen detected at t=%.2fs  conf=%.3f  (%s)",
+            t, conf, Path(video_path).name,
+        )
+        return t
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private helpers
@@ -130,12 +170,24 @@ class VsScreenDetector:
         gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
         return gray, x0, y0
 
+    def _resolve_template_paths(self, template_path: Path) -> list[Path]:
+        if template_path.exists() and template_path.is_file():
+            pattern = f"{template_path.stem}*.png"
+            matches = sorted(template_path.parent.glob(pattern))
+            if matches:
+                return matches
+            return [template_path]
+        return sorted(template_path.parent.glob(template_path.name))
+
     def _conf(self, frame: np.ndarray) -> float:
         """Template-match confidence against the search region."""
         gray, _, _ = self._search_region(frame)
-        th, tw = self.template.shape[:2]
-        if th > gray.shape[0] or tw > gray.shape[1]:
-            return 0.0
-        res = cv2.matchTemplate(gray, self.template, cv2.TM_CCOEFF_NORMED)
-        _, v, _, _ = cv2.minMaxLoc(res)
-        return float(v)
+        best = 0.0
+        for template in self.templates:
+            th, tw = template.shape[:2]
+            if th > gray.shape[0] or tw > gray.shape[1]:
+                continue
+            res = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+            _, v, _, _ = cv2.minMaxLoc(res)
+            best = max(best, float(v))
+        return best

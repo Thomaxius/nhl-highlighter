@@ -371,12 +371,19 @@ def run_pipeline(
     # Tagged segments carry trim offsets so the reel builder can cut precisely:
     #   intro_clip_start_s — seconds from the first tagged segment's start
     #   intro_clip_end_s   — seconds from the first tagged segment's start
-    vs_template = Path("configs/vs_screen_template.png")
+    vs_templates = sorted(Path("configs").glob("vs_screen_template*.png"))
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
-    if vs_template.exists():
+    FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
+    if vs_templates:
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
-        vs_detector = VsScreenDetector(template_path=vs_template)
+        vs_detector = VsScreenDetector(template_path=vs_templates[0])
+        fallback_pause_template = Path("configs/pause_menu_template.png")
+        fallback_pause_detector = (
+            PauseMenuDetector(template_path=fallback_pause_template)
+            if fallback_pause_template.exists() else None
+        )
+        fallback_pause_cache: dict[str, bool] = {}
 
         for norm_clip in normalised:
             clip_stem = norm_clip.stem
@@ -416,6 +423,88 @@ def run_pipeline(
 
             intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
 
+            # Use game_start as the upper bound; fall back to full-video scan
+            # if clock detection didn't find a game_start for this clip.
+            if game_start_t is not None:
+                vs_search_window = game_start_t + 120.0
+                logger.info(
+                    "  VS search window: 0 – %.1fs (game_start=%.1fs + 120s buffer)",
+                    vs_search_window, game_start_t,
+                )
+            else:
+                import cv2 as _cv2_vs
+                _cap_vs = _cv2_vs.VideoCapture(str(norm_clip))
+                _fps_vs = _cap_vs.get(_cv2_vs.CAP_PROP_FPS) or 30.0
+                _n_vs   = _cap_vs.get(_cv2_vs.CAP_PROP_FRAME_COUNT)
+                _cap_vs.release()
+                vs_search_window = _n_vs / _fps_vs
+                logger.info(
+                    "  VS search window: full video (%.1fs) — no game_start detected",
+                    vs_search_window,
+                )
+
+            vs_hits = vs_detector.find_matches(
+                norm_clip,
+                interval_s=0.5,
+                search_window_s=vs_search_window,
+                search_start_s=0.0,
+            )
+            if not vs_hits:
+                fallback_seg = None
+                for (start_s, end_s, seg) in seg_times2:
+                    if seg.get("label") != "other":
+                        continue
+                    if fallback_pause_detector is not None:
+                        seg_path = str(seg["path"])
+                        is_pause = fallback_pause_cache.get(seg_path)
+                        if is_pause is None:
+                            is_pause = fallback_pause_detector.detect(seg["path"])["detected"]
+                            fallback_pause_cache[seg_path] = is_pause
+                        if is_pause:
+                            logger.info(
+                                "  Fallback intro skip (pause menu): %s [t=%.1f–%.1fs]",
+                                Path(seg["path"]).name, start_s, end_s,
+                            )
+                            continue
+                    fallback_seg = (start_s, end_s, seg)
+                    break
+                if fallback_seg is None:
+                    logger.info(
+                        "  No VS screen found in %s (searched %.1fs) and no 'other' fallback segment is available",
+                        norm_clip.name, vs_search_window,
+                    )
+                    continue
+                intro_mode = "fallback"
+                intro_start = fallback_seg[0]
+                intro_end = min(cum_t, intro_start + FALLBACK_INTRO_S)
+                logger.info(
+                    "  No VS screen found in %s (searched %.1fs) — fallback to first 'other' at t=%.1fs for %.1fs",
+                    norm_clip.name, vs_search_window, intro_start, FALLBACK_INTRO_S,
+                )
+            else:
+                vs_clusters: list[list[tuple[float, float]]] = []
+                for hit_t, hit_conf in vs_hits:
+                    if not vs_clusters or (hit_t - vs_clusters[-1][-1][0]) > 1.0:
+                        vs_clusters.append([(hit_t, hit_conf)])
+                    else:
+                        vs_clusters[-1].append((hit_t, hit_conf))
+
+                chosen_cluster = vs_clusters[0]
+
+                vs_t = chosen_cluster[0][0]
+                vs_peak_conf = max(conf for _, conf in chosen_cluster)
+                logger.info(
+                    "  VS screen cluster selected: %.1f–%.1fs (peak conf %.3f, %d sampled hit(s))",
+                    chosen_cluster[0][0],
+                    chosen_cluster[-1][0],
+                    vs_peak_conf,
+                    len(chosen_cluster),
+                )
+
+                intro_mode = "vs"
+                intro_start = vs_t + PRE_VS_SKIP_S
+                intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
+
             # Tag segments spanning [intro_start, intro_end) and record exact
             # trim offsets on the first tagged segment for the reel builder.
             tagged = 0
@@ -430,13 +519,20 @@ def run_pipeline(
                         seg["intro_clip_start_s"] = max(0.0, intro_start - start_s)
                         seg["intro_clip_end_s"]   = intro_end - start_s
 
-            logger.info(
-                "Intro: VS+%.0fs (t=%.1fs) → game_start+%.0fs (t=%.1fs): "
-                "tagged %d segment(s)",
-                PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
-            )
+            if intro_mode == "vs":
+                logger.info(
+                    "Intro: VS+%.0fs (t=%.1fs) → game_start+%.0fs (t=%.1fs): "
+                    "tagged %d segment(s)",
+                    PRE_VS_SKIP_S, intro_start, POST_FACEOFF_S, intro_end, tagged,
+                )
+            else:
+                logger.info(
+                    "Fallback intro: first 'other' [t=%.1fs] → +%.0fs (t=%.1fs): "
+                    "tagged %d segment(s)",
+                    intro_start, FALLBACK_INTRO_S, intro_end, tagged,
+                )
     else:
-        logger.info("Skipping VS screen detection (configs/vs_screen_template.png not found)")
+        logger.info("Skipping VS screen detection (configs/vs_screen_template*.png not found)")
 
     # ── Step 4d.9: Pause-menu detection ────────────────────────────────────
     # Runs AFTER intro and game_end tagging so those guards work correctly.
