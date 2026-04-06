@@ -462,13 +462,13 @@ def run_pipeline(
     # Tagged segments carry trim offsets so the reel builder can cut precisely:
     #   intro_clip_start_s — seconds from the first tagged segment's start
     #   intro_clip_end_s   — seconds from the first tagged segment's start
-    vs_templates = sorted(Path("configs").glob("vs_screen_template*.png"))
+    vs_template = Path("configs/vs_screen_template3.png")
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
     FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
-    if vs_templates:
+    if vs_template.exists():
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
-        vs_detector = VsScreenDetector(template_path=vs_templates[0])
+        vs_detector = VsScreenDetector(template_path=vs_template)
         fallback_pause_template = Path("configs/pause_menu_template.png")
         fallback_pause_detector = (
             PauseMenuDetector(template_path=fallback_pause_template)
@@ -624,7 +624,7 @@ def run_pipeline(
                     intro_start, FALLBACK_INTRO_S, intro_end, tagged,
                 )
     else:
-        logger.info("Skipping VS screen detection (configs/vs_screen_template*.png not found)")
+        logger.info("Skipping VS screen detection (configs/vs_screen_template3.png not found)")
 
     # ── Step 4d.9: Pause-menu detection ────────────────────────────────────
     # Runs AFTER intro and game_end tagging so those guards work correctly.

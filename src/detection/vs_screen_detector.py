@@ -18,9 +18,11 @@ logger = logging.getLogger(__name__)
 
 # Match threshold: single scale, full-frame search in the centre band
 MIN_CONF = 0.55
-# Centre band to search: horizontal 30-70%, vertical 35-65% of frame
-SEARCH_X = (0.30, 0.70)
-SEARCH_Y = (0.35, 0.65)
+# Centre band to search — tight fit around template3 (144x543 at 1920x1080)
+# Horizontal: 45.2-54.8% (184px wide, fits 144px template)
+# Vertical: 36.0-89.9% (582px tall, fits 543px template)
+SEARCH_X = (0.452, 0.548)
+SEARCH_Y = (0.360, 0.899)
 
 
 class VsScreenDetector:
@@ -38,7 +40,7 @@ class VsScreenDetector:
 
     def __init__(
         self,
-        template_path: str | Path = "configs/vs_screen_template.png",
+        template_path: str | Path = "configs/vs_screen_template3.png",
         threshold: float = MIN_CONF,
     ) -> None:
         template_path = Path(template_path)
@@ -172,10 +174,6 @@ class VsScreenDetector:
 
     def _resolve_template_paths(self, template_path: Path) -> list[Path]:
         if template_path.exists() and template_path.is_file():
-            pattern = f"{template_path.stem}*.png"
-            matches = sorted(template_path.parent.glob(pattern))
-            if matches:
-                return matches
             return [template_path]
         return sorted(template_path.parent.glob(template_path.name))
 
