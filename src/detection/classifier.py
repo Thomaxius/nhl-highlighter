@@ -107,10 +107,12 @@ class HighlightClassifier:
 
         best_result = None         # best non-other result
         best_other_result = None   # fallback if every window says other
+        best_window_start_s = 0.0  # absolute start time (s) of the winning window
 
         start = 0
         while start < total_frames:
             end = min(start + window_frames_n, total_frames)
+            window_start_s = start / fps
             indices = np.linspace(start, end - 1, self.num_frames, dtype=int)
             frames = []
             for idx in indices:
@@ -126,6 +128,7 @@ class HighlightClassifier:
                 if result["label"] != "other":
                     if best_result is None or result["confidence"] > best_result["confidence"]:
                         best_result = result
+                        best_window_start_s = window_start_s
                 else:
                     if best_other_result is None or result["confidence"] > best_other_result["confidence"]:
                         best_other_result = result
@@ -139,6 +142,20 @@ class HighlightClassifier:
         winner = best_result if best_result is not None else best_other_result
         if winner is None:
             return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
+
+        # For scoring_chance, store the window timestamp so the reel builder
+        # can trim to just the relevant action (7s before → 3s after window end).
+        SC_PRE_S  = 7.0
+        SC_POST_S = 3.0
+        if winner["label"] == "scoring_chance" and best_result is not None:
+            trim_start = max(0.0, best_window_start_s - SC_PRE_S)
+            trim_end   = min(duration_s, best_window_start_s + self.WINDOW_SIZE_S + SC_POST_S)
+            winner["trim_start_s"] = trim_start
+            winner["trim_end_s"]   = trim_end
+            logger.debug(
+                "  SC trim: window at %.1fs → trim [%.1fs, %.1fs]",
+                best_window_start_s, trim_start, trim_end,
+            )
 
         logger.debug(
             "  Windowed inference: %s → %s (%.0f%%) over %.1fs",
