@@ -139,6 +139,10 @@ class HighlightClassifier:
 
         cap.release()
 
+        # TODO(multi-peak): instead of a single winner, collect all windows above a
+        # confidence threshold (e.g. 85%), deduplicate by proximity, and emit multiple
+        # trim ranges from one segment — so a 64s scene with 3 scoring chances surfaces
+        # all 3 clips instead of just the highest-confidence one.
         winner = best_result if best_result is not None else best_other_result
         if winner is None:
             return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
