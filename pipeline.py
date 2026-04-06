@@ -476,13 +476,6 @@ def run_pipeline(
                 seg_times2.append((cum_t, cum_t + dur, seg))
                 cum_t += dur
 
-            vs_t = vs_detector.scan_video(norm_clip, interval_s=0.5, search_window_s=60.0)
-            if vs_t is None:
-                logger.info("  No VS screen found in %s", norm_clip.name)
-                continue
-
-            intro_start = vs_t + PRE_VS_SKIP_S
-
             # Find game_start time from already-tagged segments
             game_start_t: float | None = None
             for (start_s, end_s, seg) in seg_times2:
@@ -490,10 +483,9 @@ def run_pipeline(
                     game_start_t = start_s
                     break
 
-            intro_end = (game_start_t + POST_FACEOFF_S) if game_start_t is not None else (vs_t + 35.0)
-
-            # Use game_start as the upper bound; fall back to full-video scan
-            # if clock detection didn't find a game_start for this clip.
+            # Use game_start as the upper bound for the VS screen search, with a
+            # generous buffer. Fall back to the full video if clock detection
+            # didn't find game_start (e.g. recording starts mid-game).
             if game_start_t is not None:
                 vs_search_window = game_start_t + 120.0
                 logger.info(
