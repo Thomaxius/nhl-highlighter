@@ -24,19 +24,22 @@ def build_reel(
     music_path: Optional[str | Path] = None,
     max_clips: int = 10,
     min_confidence: float = 0.55,
+    sc_min_confidence: float = 0.35,
     add_overlays: bool = True,
 ) -> Path:
     """
     Assemble a highlight reel from classified segments.
 
     Args:
-        segments:        List of classifier result dicts with "path", "label",
-                         "confidence", and optionally "score".
-        output_path:     Path for the final .mp4 reel.
-        music_path:      Optional background music file (.mp3 / .wav).
-        max_clips:       Maximum number of clips to include.
-        min_confidence:  Minimum confidence to include a clip.
-        add_overlays:    Whether to burn label text onto each clip.
+        segments:           List of classifier result dicts with "path", "label",
+                            "confidence", and optionally "score".
+        output_path:        Path for the final .mp4 reel.
+        music_path:         Optional background music file (.mp3 / .wav).
+        max_clips:          Maximum number of clips to include.
+        min_confidence:     Minimum confidence to include a clip.
+        sc_min_confidence:  Minimum confidence specifically for scoring_chance clips
+                            (lower than min_confidence to catch weaker predictions).
+        add_overlays:       Whether to burn label text onto each clip.
 
     Returns:
         Path to the assembled reel.
@@ -48,7 +51,9 @@ def build_reel(
     highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay", "scoring_chance"}
     filtered = [
         s for s in segments
-        if s.get("label") in highlight_labels and s.get("confidence", 0) >= min_confidence
+        if s.get("label") in highlight_labels and s.get("confidence", 0) >= (
+            sc_min_confidence if s.get("label") == "scoring_chance" else min_confidence
+        )
     ]
 
     # Build goal sequences: each goal pulls its chained celebration + replay along with it.

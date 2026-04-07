@@ -198,6 +198,7 @@ def run_pipeline(
     music_path: str | None = None,
     max_clips: int = 10,
     min_confidence: float = 0.55,
+    sc_min_confidence: float = 0.35,
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -1070,6 +1071,7 @@ def run_pipeline(
         music_path=music_path,
         max_clips=max_clips,
         min_confidence=min_confidence,
+        sc_min_confidence=sc_min_confidence,
     )
     logger.info("Done!  Reel → %s", output_path)
 
@@ -1086,6 +1088,8 @@ def main():
     p.add_argument("--music", default=None, help="Optional background music file")
     p.add_argument("--max_clips", type=int, default=10)
     p.add_argument("--min_confidence", type=float, default=0.55)
+    p.add_argument("--sc_min_confidence", type=float, default=0.35,
+                   help="Min confidence for scoring_chance clips (default: 0.35)")
     args = p.parse_args()
 
     if args.file:
@@ -1106,6 +1110,7 @@ def main():
         music_path=args.music,
         max_clips=args.max_clips,
         min_confidence=args.min_confidence,
+        sc_min_confidence=args.sc_min_confidence,
     )
 
 
