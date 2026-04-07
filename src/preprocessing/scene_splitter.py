@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def split_into_scenes(
     video_path: str | Path,
     output_dir: str | Path,
-    threshold: float = 27.0,
+    threshold: float = 18.0,
     min_scene_len: int = 15,
 ) -> list[Path]:
     """

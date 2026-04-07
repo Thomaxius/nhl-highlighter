@@ -22,7 +22,7 @@ def build_reel(
     segments: list[dict],
     output_path: str | Path,
     music_path: Optional[str | Path] = None,
-    max_clips: int = 10,
+    max_clips: int = 20,
     min_confidence: float = 0.55,
     sc_min_confidence: float = 0.35,
     add_overlays: bool = True,
@@ -161,16 +161,25 @@ def build_reel(
     # regular highlights that count toward max_clips.
     structural_middle = [g for g in middle_groups if g[0].get("regulation_end")]
     highlight_middle  = [g for g in middle_groups if not g[0].get("regulation_end")]
-    selected_highlights = highlight_middle[:max_clips]
+
+    # Goal groups (banner-confirmed or inferred) are always included — they are
+    # never counted against the max_clips cap so that early scoring chances
+    # cannot crowd out goals that occur later in the game (including OT goals).
+    goal_highlights  = [g for g in highlight_middle
+                        if g[0].get("banner_detected") or g[0].get("inferred_goal")]
+    other_highlights = [g for g in highlight_middle
+                        if not (g[0].get("banner_detected") or g[0].get("inferred_goal"))]
+    remaining_cap    = max(0, max_clips - len(goal_highlights))
+    selected_highlights = set(id(g) for g in goal_highlights + other_highlights[:remaining_cap])
     # Re-merge maintaining original chronological order.
     selected_middle = [g for g in middle_groups
-                       if g in selected_highlights or g in structural_middle]
+                       if id(g) in selected_highlights or g in structural_middle]
     selected_groups = head_groups + selected_middle + tail_groups
 
     logger.info(
-        "Building reel from %d groups (%d intro + %d structural + %d highlights + %d game_end) …",
+        "Building reel from %d groups (%d intro + %d structural + %d goals + %d other highlights + %d game_end) …",
         len(selected_groups), len(head_groups), len(structural_middle),
-        len(selected_highlights), int(bool(game_end_segs)),
+        len(goal_highlights), len(other_highlights[:remaining_cap]), int(bool(game_end_segs)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:

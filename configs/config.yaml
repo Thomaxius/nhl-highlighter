@@ -1,6 +1,6 @@
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 pipeline:
-  max_clips: 10
+  max_clips: 20
   min_confidence: 0.55
   add_overlays: true
   music_path: null          # set to a .mp3 path to add background music
@@ -34,6 +34,8 @@ model:
     - goal_replay
     - other_replay
     - scoring_chance
+    - faceoff_cutscene
+    - faceoff
     - other
 
 # ── Training ──────────────────────────────────────────────────────────────────
