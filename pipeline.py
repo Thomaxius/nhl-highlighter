@@ -191,7 +191,7 @@ def run_pipeline(
     output_path: str,
     checkpoint: str = "models/checkpoints/videomae_nhl",
     music_path: str | None = None,
-    max_clips: int = 10,
+    max_clips: int = 20,
     min_confidence: float = 0.55,
 ) -> None:
     input_dir = Path(input_dir)
@@ -690,7 +690,7 @@ def main():
     p.add_argument("--output", default="data/exports/reel.mp4", help="Output reel path")
     p.add_argument("--checkpoint", default="models/checkpoints/videomae_nhl")
     p.add_argument("--music", default=None, help="Optional background music file")
-    p.add_argument("--max_clips", type=int, default=10)
+    p.add_argument("--max_clips", type=int, default=20)
     p.add_argument("--min_confidence", type=float, default=0.55)
     args = p.parse_args()
 

@@ -22,7 +22,7 @@ def build_reel(
     segments: list[dict],
     output_path: str | Path,
     music_path: Optional[str | Path] = None,
-    max_clips: int = 10,
+    max_clips: int = 20,
     min_confidence: float = 0.55,
     add_overlays: bool = True,
 ) -> Path:
