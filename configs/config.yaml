@@ -42,7 +42,7 @@ model:
 training:
   data_dir: "data/labeled"
   output_dir: "models/checkpoints/videomae_nhl"
-  epochs: 10
-  batch_size: 4
+  epochs: 15
+  batch_size: 8
   learning_rate: 5.0e-5
   use_wandb: true
