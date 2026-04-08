@@ -96,14 +96,22 @@ class NHLSegmentDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         video_path, label_idx = self.samples[idx]
-        frames = self._load_frames(video_path)
+
+        npy_path = video_path.with_suffix(".npy")
+        if npy_path.exists():
+            # Fast path: load pre-decoded frame cache (T, H, W, C) uint8
+            arr = np.load(npy_path)
+            frames = [arr[i] for i in range(arr.shape[0])]
+        else:
+            frames = self._load_frames(video_path)
 
         if self.transform is not None:
             frames = self.transform(frames)
 
         # Frames: list of HxWxC numpy arrays → Tensor [T, C, H, W]
         frame_tensors = [
-            torch.from_numpy(f).permute(2, 0, 1).float() / 255.0 for f in frames
+            torch.from_numpy(np.ascontiguousarray(f)).permute(2, 0, 1).float() / 255.0
+            for f in frames
         ]
         video_tensor = torch.stack(frame_tensors)  # [T, C, H, W]
 
