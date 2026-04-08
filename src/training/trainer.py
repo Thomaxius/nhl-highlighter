@@ -103,6 +103,7 @@ def train(
     batch_size: int = 8,
     lr: float = 5e-5,
     use_wandb: bool = True,
+    resume_from_checkpoint: str | None = None,
 ) -> None:
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
@@ -145,11 +146,11 @@ def train(
         logging_steps=10,
         fp16=torch.cuda.is_available(),
         # macOS: OpenCV video decoding uses AVFoundation which cannot survive a
-        # fork(). DataLoader workers on macOS use fork and segfault immediately.
-        # On Windows/Linux with CUDA you can safely set this to 2-4.
-        dataloader_num_workers=0,
+        # fork(). On Windows/Linux with CUDA, 4-8 workers are safe and give a
+        # large speedup by overlapping video decoding with GPU training.
+        dataloader_num_workers=4,
         dataloader_pin_memory=torch.cuda.is_available(),
-        dataloader_persistent_workers=False,  # must be False when num_workers=0
+        dataloader_persistent_workers=True,
         remove_unused_columns=False,
     )
 
@@ -168,7 +169,7 @@ def train(
         class_weights=class_weights,
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(str(output_dir))
     processor.save_pretrained(str(output_dir))
     logger.info("Model saved to %s", output_dir)
@@ -186,6 +187,7 @@ def _parse_args():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--no_wandb", action="store_true")
+    p.add_argument("--resume_from_checkpoint", default=None, help="Path to checkpoint to resume from")
     return p.parse_args()
 
 
@@ -201,4 +203,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         use_wandb=not args.no_wandb,
+        resume_from_checkpoint=args.resume_from_checkpoint,
     )
