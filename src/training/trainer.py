@@ -16,12 +16,15 @@ Usage
 from pathlib import Path
 import logging
 import argparse
+import random
 import torch
+from PIL import Image, ImageEnhance
 from transformers import (
     VideoMAEForVideoClassification,
     AutoProcessor,
     TrainingArguments,
     Trainer,
+    EarlyStoppingCallback,
 )
 from torch.utils.data import DataLoader
 import numpy as np
@@ -57,9 +60,10 @@ def compute_class_weights(dataset: "NHLSegmentDataset") -> torch.Tensor:
 class WeightedTrainer(Trainer):
     """HuggingFace Trainer with inverse-frequency class weighting."""
 
-    def __init__(self, *args, class_weights: torch.Tensor = None, **kwargs):
+    def __init__(self, *args, class_weights: torch.Tensor = None, label_smoothing: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
+        self.label_smoothing = label_smoothing
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.get("labels")
@@ -71,7 +75,7 @@ class WeightedTrainer(Trainer):
         else:
             weight = None
 
-        loss_fn = torch.nn.CrossEntropyLoss(weight=weight)
+        loss_fn = torch.nn.CrossEntropyLoss(weight=weight, label_smoothing=self.label_smoothing)
         loss = loss_fn(logits, labels)
         return (loss, outputs) if return_outputs else loss
 
@@ -94,14 +98,34 @@ def collate_fn(batch):
     return {"pixel_values": pixel_values, "labels": labels}
 
 
+class VideoAugment:
+    """Temporally-consistent augmentation for a list of HxWxC uint8 numpy frames."""
+
+    def __call__(self, frames: list) -> list:
+        flip = random.random() < 0.5
+        brightness = random.uniform(0.7, 1.3)
+        contrast = random.uniform(0.7, 1.3)
+        saturation = random.uniform(0.8, 1.2)
+        out = []
+        for f in frames:
+            img = Image.fromarray(f)
+            if flip:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            img = ImageEnhance.Brightness(img).enhance(brightness)
+            img = ImageEnhance.Contrast(img).enhance(contrast)
+            img = ImageEnhance.Color(img).enhance(saturation)
+            out.append(np.array(img))
+        return out
+
+
 def train(
     data_dir: str | Path,
     output_dir: str | Path,
     base_model: str = "MCG-NJU/videomae-base",
     num_frames: int = 16,
-    epochs: int = 10,
+    epochs: int = 20,
     batch_size: int = 8,
-    lr: float = 5e-5,
+    lr: float = 2e-5,
     use_wandb: bool = True,
     resume_from_checkpoint: str | None = None,
 ) -> None:
@@ -113,7 +137,7 @@ def train(
     logger.info("Labels: %s", labels)
 
     # ── Datasets ─────────────────────────────────────────────────────────────
-    train_dataset = NHLSegmentDataset(data_dir, labels=labels, num_frames=num_frames, split="train")
+    train_dataset = NHLSegmentDataset(data_dir, labels=labels, num_frames=num_frames, split="train", transform=VideoAugment())
     val_dataset = NHLSegmentDataset(data_dir, labels=labels, num_frames=num_frames, split="val")
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -135,10 +159,11 @@ def train(
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         learning_rate=lr,
-        weight_decay=0.01,
-        warmup_steps=50,
+        weight_decay=0.05,
+        warmup_ratio=0.1,
         eval_strategy="epoch",
         save_strategy="epoch",
+        save_total_limit=3,
         load_best_model_at_end=True,
         metric_for_best_model="f1",
         report_to=report_to,
@@ -167,6 +192,8 @@ def train(
         compute_metrics=compute_metrics,
         data_collator=collate_fn,
         class_weights=class_weights,
+        label_smoothing=0.1,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
@@ -183,9 +210,9 @@ def _parse_args():
     p.add_argument("--output_dir", default="models/checkpoints/videomae_nhl")
     p.add_argument("--base_model", default="MCG-NJU/videomae-base")
     p.add_argument("--num_frames", type=int, default=16)
-    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--lr", type=float, default=5e-5)
+    p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--resume_from_checkpoint", default=None, help="Path to checkpoint to resume from")
     return p.parse_args()
