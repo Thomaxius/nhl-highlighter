@@ -17,15 +17,18 @@ def split_into_scenes(
     output_dir: str | Path,
     threshold: float = 18.0,
     min_scene_len: int = 15,
+    max_scene_duration_s: float | None = 45.0,
 ) -> list[Path]:
     """
     Detect scene cuts in *video_path* and split into separate segment files.
 
     Args:
-        video_path:    Path to a normalised .mp4 file.
-        output_dir:    Directory to write segment files into.
-        threshold:     Content-detection threshold (lower = more sensitive).
-        min_scene_len: Minimum scene length in frames.
+        video_path:          Path to a normalised .mp4 file.
+        output_dir:          Directory to write segment files into.
+        threshold:           Content-detection threshold (lower = more sensitive).
+        min_scene_len:       Minimum scene length in frames.
+        max_scene_duration_s: Force-split any scene longer than this many seconds
+                             by inserting equally-spaced cuts.  None = disabled.
 
     Returns:
         List of paths to the saved segment files.
@@ -51,6 +54,34 @@ def split_into_scenes(
 
     if not scene_list:
         return []
+
+    # Force-split any scene that exceeds max_scene_duration_s by inserting
+    # equally-spaced cuts so no individual segment is longer than the cap.
+    if max_scene_duration_s is not None:
+        fps = video.frame_rate
+        max_frames = int(max_scene_duration_s * fps)
+        expanded: list = []
+        extra = 0
+        for start_tc, end_tc in scene_list:
+            length = end_tc.get_frames() - start_tc.get_frames()
+            if length > max_frames:
+                n_parts = -(-length // max_frames)  # ceil division
+                part_frames = length // n_parts
+                prev = start_tc
+                for part in range(1, n_parts):
+                    mid = start_tc + part * part_frames
+                    expanded.append((prev, mid))
+                    prev = mid
+                    extra += 1
+                expanded.append((prev, end_tc))
+            else:
+                expanded.append((start_tc, end_tc))
+        if extra:
+            logger.info(
+                "  Max-duration split: inserted %d extra cut(s) for scenes exceeding %.0fs",
+                extra, max_scene_duration_s,
+            )
+        scene_list = expanded
 
     split_video_ffmpeg(
         str(video_path),

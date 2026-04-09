@@ -61,13 +61,16 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     included in the reel in order: goal → celebration → replay.
 
     Stops chaining when:
-    - A faceoff_cutscene or faceoff segment is reached (goal sequence is over)
+    - A faceoff_cutscene segment is reached (hard stop — next faceoff is starting)
+    - A bare `faceoff` segment accumulates too much non-highlight gap (treated as
+      a passable element; goal sequences sometimes contain a stray faceoff label
+      before the cutscene arrives)
     - An `other` segment appears that is longer than 10s (not just a transition flash)
     - A second goal is detected
     - MAX_LOOKAHEAD segments have been checked
     """
     FOLLOW_LABELS = {"celebration", "goal_replay"}
-    MAX_LOOKAHEAD = 10
+    MAX_LOOKAHEAD = 15
     MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
 
     goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected") or r.get("inferred_goal")]
@@ -89,9 +92,9 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
             if seg.get("banner_detected") or seg.get("inferred_goal"):
                 break
 
-            # Faceoff sequence means the goal chain is over
-            if seg.get("label") in {"faceoff_cutscene", "faceoff"}:
-                logger.info("  Chain stopped \u2014 faceoff sequence: %s", Path(seg["path"]).name)
+            # faceoff_cutscene = hard stop: the next faceoff sequence is beginning
+            if seg.get("label") == "faceoff_cutscene":
+                logger.info("  Chain stopped — faceoff_cutscene: %s", Path(seg["path"]).name)
                 break
 
             if seg.get("label") in FOLLOW_LABELS:
@@ -106,15 +109,15 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
                 order += 1
                 accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
 
-            elif seg.get("label") == "other":
-                # Measure this segment's duration — short ones are EA transitions, skip over them
+            else:
+                # other, other_replay, faceoff, or anything else — treat as a gap
                 duration = _get_clip_duration(seg["path"])
                 if duration <= 3.0:
                     logger.info("  Skipping short transition (%.1fs): %s", duration, Path(seg["path"]).name)
                     continue
                 accumulated_gap_s += duration
                 if accumulated_gap_s > MAX_GAP_S:
-                    logger.info("  Chain stopped — %.1fs gap exceeded 10s limit", accumulated_gap_s)
+                    logger.info("  Chain stopped — %.1fs gap exceeded %.0fs limit", accumulated_gap_s, MAX_GAP_S)
                     break
 
     return results
@@ -210,7 +213,12 @@ def run_pipeline(
     logger.info("━━━  Step 2: Splitting scenes  ━━━")
     all_segments: list[Path] = []
     for clip in normalised:
-        segs = split_into_scenes(clip, segments_dir / clip.stem)
+        segs = split_into_scenes(
+            clip,
+            segments_dir / clip.stem,
+            threshold=18.0,
+            max_scene_duration_s=45.0,
+        )
         all_segments.extend(segs)
     logger.info("Total segments: %d", len(all_segments))
 
@@ -631,25 +639,49 @@ def run_pipeline(
     # Runs AFTER intro and game_end tagging so those guards work correctly.
     # Segments where the ESC/pause menu is visible are demoted to "other".
     # Skips intro/game_end segments (those are assembled directly, not scored).
+    # Special case: if the END OF GAME menu template (pause_menu_template_end_of_game.png)
+    # fires, the segment is tagged game_end=True instead of being demoted.
     pause_template = Path("configs/pause_menu_template.png")
     if pause_template.exists():
         logger.info("━━━  Step 4d.9: Pause-menu detection  ━━━")
         pause_detector = PauseMenuDetector(template_path=pause_template)
+        eog_template_path = Path("configs/pause_menu_template_end_of_game.png")
+        eog_detector = PauseMenuDetector(template_path=eog_template_path) if eog_template_path.exists() else None
+        if eog_detector:
+            logger.info("  EOG menu detector loaded (%s)", eog_template_path.name)
         paused_count = 0
+        eog_tagged = 0
         for r in results:
             if r.get("game_end") or r.get("intro"):
                 continue
             res = pause_detector.detect(r["path"])
             if res["detected"]:
-                logger.info(
-                    "  Pause menu → demoted: %s (conf=%.2f)",
-                    Path(r["path"]).name, res["max_conf"],
-                )
-                r["label"]    = "other"
-                r["has_menu"] = True
-                paused_count += 1
+                # Before demoting, check if this is actually the END OF GAME menu.
+                is_eog = False
+                if eog_detector is not None:
+                    eog_res = eog_detector.detect(r["path"])
+                    if eog_res["detected"]:
+                        is_eog = True
+                        logger.info(
+                            "  END OF GAME menu → tagged game_end: %s (conf=%.2f)",
+                            Path(r["path"]).name, eog_res["max_conf"],
+                        )
+                        r["game_end"]       = True
+                        r["clock_event"]    = "game_end"
+                        r["game_end_score"] = 1.0
+                        eog_tagged += 1
+                if not is_eog:
+                    logger.info(
+                        "  Pause menu → demoted: %s (conf=%.2f)",
+                        Path(r["path"]).name, res["max_conf"],
+                    )
+                    r["label"]    = "other"
+                    r["has_menu"] = True
+                    paused_count += 1
         if paused_count:
             logger.info("  Demoted %d segment(s) containing pause menu.", paused_count)
+        if eog_tagged:
+            logger.info("  Tagged %d segment(s) as END OF GAME via menu template.", eog_tagged)
     else:
         logger.info("Skipping pause-menu detection (configs/pause_menu_template.png not found)")
 

@@ -13,8 +13,9 @@ ingestion:
 
 # ── Scene detection ───────────────────────────────────────────────────────────
 scene_detection:
-  threshold: 27.0           # ContentDetector threshold (lower = more cuts)
+  threshold: 18.0           # ContentDetector threshold (lower = more cuts)
   min_scene_len: 15         # Minimum scene length in frames
+  max_scene_duration_s: 45  # Force-split any scene longer than this (seconds)
 
 # ── Audio analysis ────────────────────────────────────────────────────────────
 audio:
