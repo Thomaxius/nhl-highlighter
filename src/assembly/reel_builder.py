@@ -102,7 +102,7 @@ def build_reel(
             # Start a goal group and collect chained follow-ups in order
             group = [seg]
             used_ids.add(id(seg))
-            for j in range(i + 1, min(i + 10, len(segments))):
+            for j in range(i + 1, min(i + 17, len(segments))):
                 follow = segments[j]
                 if follow.get("chain_goal_idx") == i:
                     group.append(follow)
@@ -190,7 +190,7 @@ def build_reel(
         for group_idx, group in enumerate(selected_groups):
             lead = group[0]
 
-            if lead.get("banner_detected") and len(group) > 1:
+            if lead.get("banner_detected") and (len(group) > 1 or lead.get("pre_goal_borrow")):
                 # ── Merge goal → celebration → replay into a single continuous clip ──
                 merged = tmp / f"group_{group_idx:03d}_merged.mp4"
                 _merge_goal_sequence(group, merged, tmp)
@@ -274,6 +274,19 @@ def build_reel(
                     trimmed = tmp / f"trimmed_{group_idx:03d}.mp4"
                     _ffmpeg_trim(src, trimmed, lead["trim_start_s"], lead["trim_end_s"])
                     src = trimmed
+                borrow = lead.get("pre_goal_borrow") or []
+                if borrow:
+                    bparts: list[Path] = []
+                    for bi, b in enumerate(borrow):
+                        bpart = tmp / f"borrow_{group_idx:03d}_{bi}.mp4"
+                        _ffmpeg_trim(Path(b["path"]), bpart, b["start_s"], b["end_s"])
+                        if bpart.exists():
+                            bparts.append(bpart)
+                    if bparts:
+                        bparts.append(src)
+                        merged_b = tmp / f"standalone_borrow_{group_idx:03d}.mp4"
+                        _merge_clip_parts(bparts, merged_b, tmp, f"sb{group_idx:03d}")
+                        src = merged_b
 
             dst = tmp / f"clip_{group_idx:03d}.mp4"
             if add_overlays:
@@ -322,6 +335,16 @@ def _merge_goal_sequence(group: list[dict], output: Path, tmp: Path) -> None:
     import shutil
 
     parts: list[Path] = []
+
+    # Prepend borrowed pre-goal footage (tail of the preceding segment[s]) when the
+    # banner fired near the start of the goal segment, so the shot build-up that
+    # lives in the previous segment isn't cut off.
+    for bi, b in enumerate(group[0].get("pre_goal_borrow") or []):
+        bpart = tmp / f"seq_borrow_{bi}_{output.stem}.mp4"
+        _ffmpeg_trim(Path(b["path"]), bpart, b["start_s"], b["end_s"])
+        if bpart.exists():
+            parts.append(bpart)
+
     for k, seg in enumerate(group):
         src = Path(seg["path"])
         if k == 0 and "trim_start_s" in seg:

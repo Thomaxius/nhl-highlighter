@@ -60,6 +60,12 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     tag the immediately following celebration and replay segments so they are
     included in the reel in order: goal → celebration → replay.
 
+    The in-game replay is one continuous clip that the scene-splitter frequently
+    chops into short pieces the classifier labels inconsistently as `goal_replay`
+    or `other_replay`. Once the replay run has begun (a `celebration` or
+    `goal_replay` has been chained), subsequent `other_replay` fragments are also
+    absorbed so the replay isn't truncated to a single fragment.
+
     Stops chaining when:
     - A faceoff_cutscene segment is reached (hard stop — next faceoff is starting)
     - A bare `faceoff` segment accumulates too much non-highlight gap (treated as
@@ -80,6 +86,7 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
         base_score = g.get("score", g.get("confidence", 1.0))
         order = 1
         accumulated_gap_s = 0.0
+        replay_started = False
 
         for j in range(1, MAX_LOOKAHEAD + 1):
             next_idx = goal_idx + j
@@ -97,20 +104,29 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
                 logger.info("  Chain stopped — faceoff_cutscene: %s", Path(seg["path"]).name)
                 break
 
-            if seg.get("label") in FOLLOW_LABELS:
+            label = seg.get("label")
+            # Once the replay run has begun (a celebration or goal_replay has been
+            # chained), also absorb subsequent `other_replay` fragments. The in-game
+            # replay is one continuous clip that the scene-splitter often chops into
+            # short pieces the classifier labels inconsistently as goal_replay /
+            # other_replay; dropping the other_replay pieces truncates the replay.
+            is_follow = label in FOLLOW_LABELS or (label == "other_replay" and replay_started)
+            if is_follow:
                 seg["chain_order"] = order
                 seg["chain_goal_idx"] = goal_idx
                 seg["score"] = base_score - (order * 0.01)
                 seg["confidence"] = max(seg.get("confidence", 0.0), 0.9)
                 logger.info(
                     "  Chained %s (order %d, goal %d): %s",
-                    seg["label"], order, goal_idx, Path(seg["path"]).name,
+                    label, order, goal_idx, Path(seg["path"]).name,
                 )
+                if label in {"celebration", "goal_replay"}:
+                    replay_started = True
                 order += 1
                 accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
 
             else:
-                # other, other_replay, faceoff, or anything else — treat as a gap
+                # other, faceoff, or anything else — treat as a gap
                 duration = _get_clip_duration(seg["path"])
                 if duration <= 3.0:
                     logger.info("  Skipping short transition (%.1fs): %s", duration, Path(seg["path"]).name)
@@ -279,7 +295,7 @@ def run_pipeline(
             banner_times = detector.scan_video(norm_clip, interval_s=1.0)
 
             for bt in banner_times:
-                for (start_s, end_s, seg, seg_fps) in seg_ranges:
+                for seg_i, (start_s, end_s, seg, seg_fps) in enumerate(seg_ranges):
                     if start_s <= bt < end_s:
                         local_t  = bt - start_s
                         seg_dur  = end_s - start_s
@@ -289,6 +305,33 @@ def run_pipeline(
                         # Trim window centred on the goal frame, clamped to segment
                         seg["trim_start_s"] = max(0.0, local_t - PRE_GOAL_S)
                         seg["trim_end_s"]   = min(seg_dur, local_t + POST_GOAL_S)
+                        # If the goal frame sits near the very start of this segment,
+                        # the pre-goal window clamps to 0 and the actual shot lives at
+                        # the tail of the preceding segment(s). Borrow that footage so
+                        # the build-up isn't cut off at the moment of the shot.
+                        deficit = PRE_GOAL_S - local_t
+                        if deficit > 0.05 and seg_i > 0:
+                            borrow: list[dict] = []
+                            remaining = deficit
+                            bi = seg_i - 1
+                            while remaining > 0.05 and bi >= 0:
+                                b_start, b_end, b_seg, _b_fps = seg_ranges[bi]
+                                b_dur = b_end - b_start
+                                take = min(remaining, b_dur)
+                                borrow.insert(0, {
+                                    "path": str(b_seg["path"]),
+                                    "start_s": round(b_dur - take, 3),
+                                    "end_s": round(b_dur, 3),
+                                })
+                                remaining -= take
+                                bi -= 1
+                            if borrow:
+                                seg["pre_goal_borrow"] = borrow
+                                logger.info(
+                                    "  Pre-goal borrow: %.1fs from %d prior segment(s) → %s",
+                                    deficit - remaining, len(borrow),
+                                    ", ".join(Path(b["path"]).name for b in borrow),
+                                )
                         logger.info(
                             "Banner detected via raw scan: t=%.1fs → %s  "
                             "trim %.1fs→%.1fs",
