@@ -63,8 +63,11 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     The in-game replay is one continuous clip that the scene-splitter frequently
     chops into short pieces the classifier labels inconsistently as `goal_replay`
     or `other_replay`. Once the replay run has begun (a `celebration` or
-    `goal_replay` has been chained), subsequent `other_replay` fragments are also
-    absorbed so the replay isn't truncated to a single fragment.
+    `goal_replay` has been chained, or a leading `other_replay` directly follows
+    the goal with no real gap), subsequent `other_replay` fragments are also
+    absorbed so the replay isn't truncated. Inferred goals / scoring chances often
+    have no celebration cutscene, so their replay begins immediately as
+    `other_replay` — that leading fragment starts the run.
 
     Stops chaining when:
     - A faceoff_cutscene segment is reached (hard stop — next faceoff is starting)
@@ -105,12 +108,17 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
                 break
 
             label = seg.get("label")
-            # Once the replay run has begun (a celebration or goal_replay has been
-            # chained), also absorb subsequent `other_replay` fragments. The in-game
-            # replay is one continuous clip that the scene-splitter often chops into
-            # short pieces the classifier labels inconsistently as goal_replay /
-            # other_replay; dropping the other_replay pieces truncates the replay.
-            is_follow = label in FOLLOW_LABELS or (label == "other_replay" and replay_started)
+            # Once the replay run has begun, also absorb subsequent `other_replay`
+            # fragments. The in-game replay is one continuous clip that the
+            # scene-splitter often chops into short pieces the classifier labels
+            # inconsistently as goal_replay / other_replay; dropping the
+            # other_replay pieces truncates the replay. A leading `other_replay`
+            # that directly follows the goal (no real >3s gap yet) also starts the
+            # run — inferred goals / scoring chances frequently have no celebration
+            # cutscene, so their replay begins straight away as `other_replay`.
+            is_follow = label in FOLLOW_LABELS or (
+                label == "other_replay" and (replay_started or accumulated_gap_s == 0.0)
+            )
             if is_follow:
                 seg["chain_order"] = order
                 seg["chain_goal_idx"] = goal_idx
@@ -120,7 +128,7 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
                     "  Chained %s (order %d, goal %d): %s",
                     label, order, goal_idx, Path(seg["path"]).name,
                 )
-                if label in {"celebration", "goal_replay"}:
+                if label in {"celebration", "goal_replay", "other_replay"}:
                     replay_started = True
                 order += 1
                 accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
