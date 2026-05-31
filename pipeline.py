@@ -518,6 +518,8 @@ def run_pipeline(
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
     FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
+    FALLBACK_INTRO_MAX_START_S = 20.0  # only treat an early 'other' as a cold-open intro if it begins this soon
+    MIN_FALLBACK_INTRO_S = 4.0  # skip a fabricated intro shorter than this (after goal-overlap clamp)
     if vs_template.exists():
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
         vs_detector = VsScreenDetector(template_path=vs_template)
@@ -609,12 +611,40 @@ def run_pipeline(
                         norm_clip.name, vs_search_window,
                     )
                     continue
+                # A genuine intro / cold-open sits at the very start of the clip.
+                # If the first eligible 'other' segment begins well into the clip,
+                # the recording simply has no intro (e.g. a mid-game cut) — don't
+                # fabricate one from arbitrary gameplay, which could duplicate a
+                # later highlight.
+                if fallback_seg[0] > FALLBACK_INTRO_MAX_START_S:
+                    logger.info(
+                        "  No VS screen and first 'other' at t=%.1fs is past the %.0fs cold-open window — no intro for %s",
+                        fallback_seg[0], FALLBACK_INTRO_MAX_START_S, norm_clip.name,
+                    )
+                    continue
                 intro_mode = "fallback"
                 intro_start = fallback_seg[0]
                 intro_end = min(cum_t, intro_start + FALLBACK_INTRO_S)
+                # Never let the cold-open extend into a goal sequence — that would
+                # show the goal/replay once as a fake intro and again at its real
+                # chronological position.
+                goal_starts = [
+                    s for (s, e, sg) in seg_times2
+                    if (sg.get("banner_detected") or sg.get("inferred_goal")) and s > intro_start
+                ]
+                if goal_starts:
+                    next_goal_s = min(goal_starts)
+                    if next_goal_s < intro_end:
+                        intro_end = next_goal_s
+                if intro_end - intro_start < MIN_FALLBACK_INTRO_S:
+                    logger.info(
+                        "  Fallback intro for %s would be <%.0fs after goal-overlap clamp — skipping intro",
+                        norm_clip.name, MIN_FALLBACK_INTRO_S,
+                    )
+                    continue
                 logger.info(
-                    "  No VS screen found in %s (searched %.1fs) — fallback to first 'other' at t=%.1fs for %.1fs",
-                    norm_clip.name, vs_search_window, intro_start, FALLBACK_INTRO_S,
+                    "  No VS screen found in %s (searched %.1fs) — fallback cold-open at t=%.1f–%.1fs",
+                    norm_clip.name, vs_search_window, intro_start, intro_end,
                 )
             else:
                 vs_clusters: list[list[tuple[float, float]]] = []
@@ -671,9 +701,8 @@ def run_pipeline(
                 )
             else:
                 logger.info(
-                    "Fallback intro: first 'other' [t=%.1fs] → +%.0fs (t=%.1fs): "
-                    "tagged %d segment(s)",
-                    intro_start, FALLBACK_INTRO_S, intro_end, tagged,
+                    "Fallback intro: cold-open [t=%.1f–%.1fs]: tagged %d segment(s)",
+                    intro_start, intro_end, tagged,
                 )
     else:
         logger.info("Skipping VS screen detection (configs/vs_screen_template3.png not found)")
