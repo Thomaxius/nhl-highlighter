@@ -1,16 +1,16 @@
 ---
 - name: Copy YouTube watcher script
   ansible.builtin.copy:
-    src: ../../../../scripts/youtube_watcher.py
-    dest: "{{ app_dir }}/scripts/youtube_watcher.py"
+    src: ../../../../apps/poller/youtube_watcher.py
+    dest: "{{ app_dir }}/apps/poller/youtube_watcher.py"
     owner: "{{ app_user }}"
     group: "{{ app_user }}"
     mode: "0755"
 
 - name: Copy YouTube upload script
   ansible.builtin.copy:
-    src: ../../../../scripts/upload_youtube.py
-    dest: "{{ app_dir }}/scripts/upload_youtube.py"
+    src: ../../../../apps/uploader/upload_youtube.py
+    dest: "{{ app_dir }}/apps/uploader/upload_youtube.py"
     owner: "{{ app_user }}"
     group: "{{ app_user }}"
     mode: "0755"
@@ -41,9 +41,9 @@
   ansible.builtin.debug:
     msg:
       - "==== NEXT STEPS ===="
-      - "1. Edit {{ app_dir }}/config/watcher.env — fill in YOUTUBE_CHANNEL_ID and YOUTUBE_API_KEY"
-      - "2. Upload OAuth credentials: scp client_secrets.json root@SERVER:{{ app_dir }}/config/"
-      - "3. Run OAuth first-time auth: sudo -u {{ app_user }} {{ venv_dir }}/bin/python {{ app_dir }}/scripts/upload_youtube.py --file /dev/null --title test"
+      - "1. Edit {{ app_dir }}/config/watcher.env — fill in YOUTUBE_CHANNEL_ID"
+      - "2. Run OAuth consent locally (once): set env vars and run youtube_watcher.py interactively to generate token.json"
+      - "3. Upload OAuth credentials: scp config/client_secrets.json config/token.json root@SERVER:{{ app_dir }}/config/"
       - "4. Upload model checkpoint: scp -r models/checkpoints/videomae_nhl root@SERVER:{{ app_dir }}/models/checkpoints/"
       - "5. Restart watcher: systemctl restart nhl-watcher"
       - "6. Check logs: journalctl -u nhl-watcher -f"

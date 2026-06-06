@@ -33,6 +33,12 @@ ENV/
 # ── Config templates (keep these tracked) ────────────────────────────────────
 !configs/*.png
 
+# ── OAuth credentials — never commit ─────────────────────────────────────────
+config/client_secrets.json
+configs/client_secrets.json
+config/token.json
+configs/token.json
+
 # ── Model weights ─────────────────────────────────────────────────────────────
 *.pt
 *.pth
