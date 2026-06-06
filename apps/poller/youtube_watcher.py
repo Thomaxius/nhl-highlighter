@@ -205,7 +205,8 @@ def run_pipeline(input_file: Path, output_file: Path):
         raise RuntimeError(f"pipeline.py exited with code {result.returncode}")
 
 
-def upload_highlight(video_file: Path, title: str):
+def upload_highlight(video_file: Path, title: str) -> str | None:
+    """Upload the reel and return the new YouTube video ID (or None if unparseable)."""
     description = UPLOAD_DESCRIPTION_TEMPLATE.format(title=title)
     result = subprocess.run(
         [
@@ -217,9 +218,25 @@ def upload_highlight(video_file: Path, title: str):
             "--privacy", UPLOAD_PRIVACY,
         ],
         cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
     )
+    # Always surface uploader output so it appears in our log
+    if result.stdout:
+        for line in result.stdout.strip().splitlines():
+            logger.info("[uploader] %s", line)
+    if result.stderr:
+        for line in result.stderr.strip().splitlines():
+            logger.warning("[uploader] %s", line)
     if result.returncode != 0:
         raise RuntimeError(f"upload_youtube.py exited with code {result.returncode}")
+    # Parse the video ID from the "Upload complete!" line so we can record it
+    # in state and avoid re-processing our own uploads on the next poll.
+    for line in result.stdout.splitlines():
+        match = re.search(r"youtube\.com/watch\?v=([A-Za-z0-9_-]+)", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 # ── Main processing loop ──────────────────────────────────────────────────────
@@ -253,10 +270,17 @@ def process_video(video_id: str, title: str, state: dict):
         save_state(state)
 
         logger.info("Uploading: %s", title)
-        upload_highlight(output_file, title)
+        reel_video_id = upload_highlight(output_file, title)
         logger.info("Upload done.")
 
         state["processed"][video_id]["status"] = "done"
+        if reel_video_id:
+            # Track the uploaded reel's video ID so the poller skips it on
+            # future polls instead of treating it as a new video to process.
+            uploaded = state.setdefault("uploaded_reels", [])
+            if reel_video_id not in uploaded:
+                uploaded.append(reel_video_id)
+            logger.info("Reel uploaded as https://youtube.com/watch?v=%s", reel_video_id)
         save_state(state)
 
         # Clean up large files now that the reel is uploaded.
@@ -300,6 +324,12 @@ def main():
 
             for video in videos:
                 video_id = video["video_id"]
+
+                # Skip videos we uploaded ourselves (highlight reels)
+                if video_id in state.get("uploaded_reels", []):
+                    logger.debug("Skipping our own reel: %s", video_id)
+                    continue
+
                 existing = state["processed"].get(video_id, {})
                 existing_status = existing.get("status")
 
