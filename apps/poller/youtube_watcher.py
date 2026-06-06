@@ -173,7 +173,7 @@ def download_video(video_id: str, output_dir: Path) -> Path:
     output_template = str(output_dir / f"{video_id}.%(ext)s")
     cmd = [
         str(VENV_YTDLP),
-        "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
         "--output", output_template,
         "--merge-output-format", "mp4",
         "--js-runtimes", "node",
