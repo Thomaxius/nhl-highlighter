@@ -331,6 +331,9 @@ def build_reel(
             import shutil
             shutil.copy2(concat_out, output_path)
 
+    # Safety net: enforce a hard maximum duration on the final reel.
+    _enforce_max_duration(output_path, MAX_REEL_DURATION_S)
+
     logger.info("Reel saved → %s", output_path)
     return output_path
 
@@ -530,6 +533,44 @@ def _probe_duration(path: Path) -> float | None:
         return float(result.stdout.strip())
     except (ValueError, AttributeError):
         return None
+
+
+def _enforce_max_duration(output: Path, max_seconds: int) -> None:
+    """
+    Last-resort safety net: if the final reel is longer than ``max_seconds``,
+    hard-trim it in place. This guards against pathological assembly output
+    (e.g. timestamp blow-ups producing 24h files) that YouTube would reject.
+
+    The trim re-encodes rather than stream-copying, so it also re-normalises
+    timestamps even when the source file is corrupt.
+    """
+    duration = _probe_duration(output)
+    if duration is None:
+        logger.warning("Could not probe reel duration; skipping max-duration check")
+        return
+    if duration <= max_seconds:
+        return
+
+    logger.warning(
+        "Reel duration %.1fs exceeds cap of %ds — trimming to limit",
+        duration, max_seconds,
+    )
+    trimmed = output.with_name(output.stem + "_trimmed.mp4")
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts",
+        "-i", str(output),
+        "-t", str(max_seconds),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-ar", "44100",
+        "-vsync", "cfr",
+        "-avoid_negative_ts", "make_zero",
+        str(trimmed),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Max-duration trim failed:\n{result.stderr[-300:]}")
+    trimmed.replace(output)
 
 
 def _ffmpeg_concat(concat_list: Path, output: Path) -> None:
