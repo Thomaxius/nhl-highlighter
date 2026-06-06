@@ -6,5 +6,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$([ -d "$ROOT/.venv" ] && echo "$ROOT/.venv/bin/python" || echo "$ROOT/venv/bin/python")"
 
-exec "$ROOT/.venv/bin/python" -m apps.trainer.src.training.trainer "$@"
+exec "$PYTHON" -m apps.trainer.src.training.trainer "$@"

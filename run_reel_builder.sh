@@ -7,5 +7,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$([ -d "$ROOT/.venv" ] && echo "$ROOT/.venv/bin/python" || echo "$ROOT/venv/bin/python")"
 
-exec "$ROOT/.venv/bin/python" "$ROOT/apps/reel_builder/pipeline.py" "$@"
+exec "$PYTHON" "$ROOT/apps/reel_builder/pipeline.py" "$@"

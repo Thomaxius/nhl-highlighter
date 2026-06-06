@@ -6,7 +6,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$([ -d "$ROOT/.venv" ] && echo "$ROOT/.venv/bin/python" || echo "$ROOT/venv/bin/python")"
 
 export APP_DIR="${APP_DIR:-$ROOT}"
 
-exec "$ROOT/.venv/bin/python" "$ROOT/apps/uploader/upload_youtube.py" "$@"
+exec "$PYTHON" "$ROOT/apps/uploader/upload_youtube.py" "$@"
