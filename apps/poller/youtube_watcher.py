@@ -233,9 +233,14 @@ def process_video(video_id: str, title: str, state: dict):
     save_state(state)
 
     try:
-        logger.info("Downloading...")
-        downloaded = download_video(video_id, raw_video_dir)
-        logger.info("Downloaded: %s", downloaded.name)
+        existing = list(raw_video_dir.glob("*.mp4")) + list(raw_video_dir.glob("*.webm")) if raw_video_dir.exists() else []
+        if existing:
+            downloaded = existing[0]
+            logger.info("Raw file already present, skipping download: %s", downloaded.name)
+        else:
+            logger.info("Downloading...")
+            downloaded = download_video(video_id, raw_video_dir)
+            logger.info("Downloaded: %s", downloaded.name)
 
         state["processed"][video_id]["status"] = "processing"
         save_state(state)
