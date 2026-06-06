@@ -53,7 +53,9 @@ UPLOAD_DESCRIPTION_TEMPLATE = (
 )
 
 _is_windows = platform.system() == "Windows"
-VENV_PYTHON = APP_DIR / (".venv" if _is_windows else "venv") / ("Scripts\\python.exe" if _is_windows else "bin/python")
+_venv_root = APP_DIR / (".venv" if _is_windows else "venv")
+VENV_PYTHON = _venv_root / ("Scripts\\python.exe" if _is_windows else "bin/python")
+VENV_YTDLP  = _venv_root / ("Scripts\\yt-dlp.exe" if _is_windows else "bin/yt-dlp")
 PIPELINE_SCRIPT = APP_DIR / "apps" / "reel_builder" / "pipeline.py"
 UPLOAD_SCRIPT = APP_DIR / "apps" / "uploader" / "upload_youtube.py"
 STATE_FILE = APP_DIR / "apps" / "shared" / "data" / "processed_videos.json"
@@ -170,7 +172,7 @@ def download_video(video_id: str, output_dir: Path) -> Path:
     output_template = str(output_dir / f"{video_id}.%(ext)s")
     result = subprocess.run(
         [
-            "yt-dlp",
+            str(VENV_YTDLP),
             "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
             "--output", output_template,
             "--merge-output-format", "mp4",
