@@ -25,6 +25,7 @@ First-run OAuth flow:
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -45,8 +46,14 @@ OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECS", "900"))
 MIN_DURATION = int(os.environ.get("MIN_VIDEO_DURATION_SECS", "1800"))
 UPLOAD_PRIVACY = os.environ.get("UPLOAD_PRIVACY", "unlisted")
+UPLOAD_DESCRIPTION_TEMPLATE = (
+    "{title}\n\n"
+    "This highlight reel was automatically generated with NHL Highlighter:\n"
+    "https://github.com/Thomaxius/nhl-highlighter"
+)
 
-VENV_PYTHON = APP_DIR / "venv" / "bin" / "python"
+_is_windows = platform.system() == "Windows"
+VENV_PYTHON = APP_DIR / (".venv" if _is_windows else "venv") / ("Scripts\\python.exe" if _is_windows else "bin/python")
 PIPELINE_SCRIPT = APP_DIR / "apps" / "reel_builder" / "pipeline.py"
 UPLOAD_SCRIPT = APP_DIR / "apps" / "uploader" / "upload_youtube.py"
 STATE_FILE = APP_DIR / "apps" / "shared" / "data" / "processed_videos.json"
@@ -138,15 +145,18 @@ def get_latest_videos(service, playlist_id: str, max_results: int = 10) -> list[
     ]
 
 
-def get_video_duration_secs(service, video_id: str) -> int:
+def get_video_duration_secs(service, video_id: str) -> int | None:
+    """Return duration in seconds, or None if the API returned no data (e.g. video
+    still processing). Never returns 0 for a missing video — callers should treat
+    None as "unknown, retry later"."""
     resp = service.videos().list(part="contentDetails", id=video_id).execute()
     items = resp.get("items", [])
     if not items:
-        return 0
+        return None
     duration_str = items[0]["contentDetails"]["duration"]  # ISO 8601: PT2H5M30S
     match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration_str)
     if not match:
-        return 0
+        return None
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
     seconds = int(match.group(3) or 0)
@@ -193,12 +203,14 @@ def run_pipeline(input_file: Path, output_file: Path):
 
 
 def upload_highlight(video_file: Path, title: str):
+    description = UPLOAD_DESCRIPTION_TEMPLATE.format(title=title)
     result = subprocess.run(
         [
             str(VENV_PYTHON),
             str(UPLOAD_SCRIPT),
             "--file", str(video_file),
             "--title", title,
+            "--description", description,
             "--privacy", UPLOAD_PRIVACY,
         ],
         cwd=str(APP_DIR),
@@ -232,13 +244,26 @@ def process_video(video_id: str, title: str, state: dict):
         state["processed"][video_id]["status"] = "uploading"
         save_state(state)
 
-        highlight_title = f"NHL 25 Highlights – {title}"
-        logger.info("Uploading: %s", highlight_title)
-        upload_highlight(output_file, highlight_title)
+        logger.info("Uploading: %s", title)
+        upload_highlight(output_file, title)
         logger.info("Upload done.")
 
         state["processed"][video_id]["status"] = "done"
         save_state(state)
+
+        # Clean up large files now that the reel is uploaded.
+        # Segments in processed/ are kept for model training.
+        try:
+            import shutil
+            if raw_video_dir.exists():
+                shutil.rmtree(raw_video_dir)
+                logger.info("Deleted raw dir: %s", raw_video_dir)
+            if output_file.exists():
+                output_file.unlink()
+                logger.info("Deleted export: %s", output_file)
+        except Exception as cleanup_exc:
+            logger.warning("Cleanup failed (non-fatal): %s", cleanup_exc)
+
         logger.info("=== Done: %s ===", video_id)
 
     except Exception as exc:
@@ -279,6 +304,12 @@ def main():
                     continue
 
                 duration = get_video_duration_secs(service, video_id)
+                if duration is None:
+                    logger.warning(
+                        "Could not retrieve duration for %s — video may still be processing; will retry next poll",
+                        video_id,
+                    )
+                    continue
                 if duration < MIN_DURATION:
                     logger.info(
                         "Skipping short video %s (%ds < %ds minimum)",
