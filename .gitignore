@@ -40,6 +40,7 @@ apps/reel_builder/configs/client_secrets.json
 config/token.json
 configs/token.json
 apps/reel_builder/configs/token.json
+config/youtube_token.json
 
 # ── Model weights ─────────────────────────────────────────────────────────────
 *.pt
