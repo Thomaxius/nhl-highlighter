@@ -190,7 +190,7 @@ def build_reel(
         for group_idx, group in enumerate(selected_groups):
             lead = group[0]
 
-            if lead.get("banner_detected") and (len(group) > 1 or lead.get("pre_goal_borrow")):
+            if (lead.get("banner_detected") or lead.get("inferred_goal")) and (len(group) > 1 or lead.get("pre_goal_borrow")):
                 # ── Merge goal → celebration → replay into a single continuous clip ──
                 merged = tmp / f"group_{group_idx:03d}_merged.mp4"
                 _merge_goal_sequence(group, merged, tmp)
