@@ -58,7 +58,8 @@ nhl-highlighter/
 │       └── training-data/           # Raw source clips by category
 ├── config/
 │   ├── client_secrets.json          # OAuth 2.0 credentials (not in git)
-│   └── token.json                   # Cached OAuth token (not in git)
+│   ├── token.json                   # Cached poller OAuth token (not in git)
+│   └── youtube_token.json           # Cached uploader OAuth token (not in git)
 ├── infra/
 │   └── ansible/                     # Server provisioning playbooks
 ├── tests/
@@ -195,7 +196,10 @@ python apps/uploader/upload_youtube.py \
     --privacy unlisted
 ```
 
-Uses the same `client_secrets.json` / `token.json` as the poller. The first run will prompt for OAuth consent if no token exists.
+Uses the same `client_secrets.json` as the poller but caches its token separately in `config/youtube_token.json` (needs the `youtube.upload` scope). The first run will print a URL — open it in your browser, complete consent, and the token is saved automatically. SCP it to the server for headless use:
+```bash
+scp config/youtube_token.json root@SERVER:/opt/nhl-highlighter/config/youtube_token.json
+```
 
 ---
 

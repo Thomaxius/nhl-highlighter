@@ -57,9 +57,10 @@ def get_authenticated_service():
                 print(f"     scp client_secrets.json root@SERVER:{CREDENTIALS_FILE}")
                 sys.exit(1)
 
-            # run_console() is headless-safe: prints a URL and reads a pasted code.
+            # run_local_server with open_browser=False prints a URL to visit,
+            # then waits for the redirect on port 8081 (separate from the poller's 8080).
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
-            creds = flow.run_console()
+            creds = flow.run_local_server(port=8081, open_browser=False)
 
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         TOKEN_FILE.write_text(creds.to_json())
