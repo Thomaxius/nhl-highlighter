@@ -296,11 +296,19 @@ def build_reel(
                 _shutil.copy2(src, dst)
             processed_clips.append(dst)
 
-        # Step 2: Add fade-in / fade-out to each clip
+        # Step 2: Fade in only the first clip and fade out only the last clip.
+        # Internal transitions are hard cuts so there are no black flashes between
+        # sequences (e.g. shot → goal, or goal → next highlight).
         faded_clips: list[Path] = []
+        n_clips = len(processed_clips)
         for i, clip in enumerate(processed_clips):
             faded = tmp / f"faded_{i:03d}.mp4"
-            _add_fades(clip, faded, fade_duration=FADE_DURATION)
+            _add_fades(
+                clip, faded,
+                fade_duration=FADE_DURATION,
+                fade_in=(i == 0),
+                fade_out=(i == n_clips - 1),
+            )
             faded_clips.append(faded)
 
         # Step 3: Concatenate
@@ -468,17 +476,55 @@ def _burn_overlay(src: Path, dst: Path, label: str, confidence: float) -> None:
         shutil.copy2(src, dst)
 
 
-def _add_fades(src: Path, dst: Path, fade_duration: float) -> None:
-    cmd = [
-        "ffmpeg", "-y", "-i", str(src),
-        "-vf", f"fade=t=in:d={fade_duration},fade=t=out:st=99999:d={fade_duration}",
-        "-af", f"afade=t=in:d={fade_duration},afade=t=out:st=99999:d={fade_duration}",
+def _add_fades(
+    src: Path,
+    dst: Path,
+    fade_duration: float,
+    fade_in: bool = True,
+    fade_out: bool = True,
+) -> None:
+    """Re-encode `src` to a uniform spec, optionally adding a fade-in from black
+    at the start and/or a fade-out to black at the end. Always re-encodes (even
+    with no fades) so every clip shares identical codec params for a safe
+    stream-copy concat."""
+    vf_parts: list[str] = []
+    af_parts: list[str] = []
+    if fade_in:
+        vf_parts.append(f"fade=t=in:d={fade_duration}")
+        af_parts.append(f"afade=t=in:d={fade_duration}")
+    if fade_out:
+        dur = _probe_duration(src)
+        if dur and dur > fade_duration:
+            st = max(0.0, dur - fade_duration)
+            vf_parts.append(f"fade=t=out:st={st:.3f}:d={fade_duration}")
+            af_parts.append(f"afade=t=out:st={st:.3f}:d={fade_duration}")
+    cmd = ["ffmpeg", "-y", "-i", str(src)]
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
+    if af_parts:
+        cmd += ["-af", ",".join(af_parts)]
+    cmd += [
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-ar", "44100",
         str(dst),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         import shutil
         shutil.copy2(src, dst)
+
+
+def _probe_duration(path: Path) -> float | None:
+    """Return the duration of a media file in seconds, or None if unavailable."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
 
 
 def _ffmpeg_concat(concat_list: Path, output: Path) -> None:
