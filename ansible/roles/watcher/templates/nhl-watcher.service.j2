@@ -1,0 +1,21 @@
+[Unit]
+Description=NHL Highlighter – YouTube Watcher & Pipeline Orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+WorkingDirectory={{ app_dir }}
+EnvironmentFile={{ app_dir }}/config/watcher.env
+ExecStart={{ venv_dir }}/bin/python {{ app_dir }}/scripts/youtube_watcher.py
+Restart=on-failure
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+# Give the pipeline enough time to finish before systemd kills it on stop
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

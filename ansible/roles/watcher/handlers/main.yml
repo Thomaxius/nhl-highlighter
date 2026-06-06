@@ -1,0 +1,6 @@
+---
+- name: Reload and restart watcher
+  ansible.builtin.systemd:
+    name: nhl-watcher
+    state: restarted
+    daemon_reload: true

@@ -1,0 +1,31 @@
+---
+# Re-deploy app code and restart the watcher without touching system packages.
+# Usage: ansible-playbook -i inventory.ini deploy.yml
+- name: Deploy updated code
+  hosts: nhl_server
+  become: true
+  tasks:
+    - name: Pull latest code
+      become_user: "{{ app_user }}"
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ repo_branch }}"
+        force: true
+
+    - name: Sync watcher scripts
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ app_dir }}/scripts/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+      loop:
+        - ../scripts/youtube_watcher.py
+        - ../scripts/upload_youtube.py
+
+    - name: Restart watcher service
+      ansible.builtin.systemd:
+        name: nhl-watcher
+        state: restarted
+        daemon_reload: true

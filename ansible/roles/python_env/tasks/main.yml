@@ -1,0 +1,88 @@
+---
+- name: Check whether app directory is already a git repo
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/.git"
+  register: app_git_stat
+
+- name: Remove directory so git can clone fresh (no .git found)
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: absent
+  when: not app_git_stat.stat.exists
+
+# Clone as root so it can create /opt/nhl-highlighter itself
+- name: Clone repository
+  ansible.builtin.git:
+    repo: "{{ repo_url }}"
+    dest: "{{ app_dir }}"
+    version: "{{ repo_branch }}"
+    force: false
+  when: not app_git_stat.stat.exists
+
+- name: Pull latest code (repo already exists)
+  ansible.builtin.git:
+    repo: "{{ repo_url }}"
+    dest: "{{ app_dir }}"
+    version: "{{ repo_branch }}"
+    force: false
+  when: app_git_stat.stat.exists
+
+- name: Set ownership of app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    recurse: true
+
+- name: Create application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+  loop:
+    - "{{ app_dir }}/data/raw"
+    - "{{ app_dir }}/data/processed"
+    - "{{ app_dir }}/data/exports"
+    - "{{ app_dir }}/data/labeled"
+    - "{{ app_dir }}/logs"
+    - "{{ app_dir }}/models/checkpoints"
+    - "{{ app_dir }}/config"
+    - "{{ app_dir }}/scripts"
+
+- name: Create virtualenv
+  become_user: "{{ app_user }}"
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ venv_dir }}
+    creates: "{{ venv_dir }}/bin/python"
+
+- name: Upgrade pip
+  become_user: "{{ app_user }}"
+  ansible.builtin.pip:
+    name: pip
+    state: latest
+    virtualenv: "{{ venv_dir }}"
+
+- name: Install CPU-only PyTorch (before requirements.txt to avoid pulling CUDA build)
+  become_user: "{{ app_user }}"
+  ansible.builtin.pip:
+    name:
+      - torch
+      - torchvision
+      - torchaudio
+    extra_args: "--index-url https://download.pytorch.org/whl/cpu"
+    virtualenv: "{{ venv_dir }}"
+
+- name: Install project requirements
+  become_user: "{{ app_user }}"
+  ansible.builtin.pip:
+    requirements: "{{ app_dir }}/requirements.txt"
+    virtualenv: "{{ venv_dir }}"
+
+- name: Install server-specific requirements
+  become_user: "{{ app_user }}"
+  ansible.builtin.pip:
+    requirements: "{{ app_dir }}/requirements-server.txt"
+    virtualenv: "{{ venv_dir }}"

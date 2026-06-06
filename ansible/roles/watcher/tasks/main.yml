@@ -1,0 +1,49 @@
+---
+- name: Copy YouTube watcher script
+  ansible.builtin.copy:
+    src: ../../../../scripts/youtube_watcher.py
+    dest: "{{ app_dir }}/scripts/youtube_watcher.py"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
+- name: Copy YouTube upload script
+  ansible.builtin.copy:
+    src: ../../../../scripts/upload_youtube.py
+    dest: "{{ app_dir }}/scripts/upload_youtube.py"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
+- name: Template watcher environment file
+  ansible.builtin.template:
+    src: watcher.env.j2
+    dest: "{{ app_dir }}/config/watcher.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0600"  # secrets — not world-readable
+
+- name: Template systemd service
+  ansible.builtin.template:
+    src: nhl-watcher.service.j2
+    dest: /etc/systemd/system/nhl-watcher.service
+    mode: "0644"
+  notify: Reload and restart watcher
+
+- name: Enable and start watcher service
+  ansible.builtin.systemd:
+    name: nhl-watcher
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Print setup instructions
+  ansible.builtin.debug:
+    msg:
+      - "==== NEXT STEPS ===="
+      - "1. Edit {{ app_dir }}/config/watcher.env — fill in YOUTUBE_CHANNEL_ID and YOUTUBE_API_KEY"
+      - "2. Upload OAuth credentials: scp client_secrets.json root@SERVER:{{ app_dir }}/config/"
+      - "3. Run OAuth first-time auth: sudo -u {{ app_user }} {{ venv_dir }}/bin/python {{ app_dir }}/scripts/upload_youtube.py --file /dev/null --title test"
+      - "4. Upload model checkpoint: scp -r models/checkpoints/videomae_nhl root@SERVER:{{ app_dir }}/models/checkpoints/"
+      - "5. Restart watcher: systemctl restart nhl-watcher"
+      - "6. Check logs: journalctl -u nhl-watcher -f"

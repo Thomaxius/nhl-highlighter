@@ -1,0 +1,8 @@
+---
+- name: Full server setup
+  hosts: nhl_server
+  become: true
+  roles:
+    - base
+    - python_env
+    - watcher
