@@ -56,6 +56,7 @@ _is_windows = platform.system() == "Windows"
 _venv_root = APP_DIR / (".venv" if _is_windows else "venv")
 VENV_PYTHON = _venv_root / ("Scripts\\python.exe" if _is_windows else "bin/python")
 VENV_YTDLP  = _venv_root / ("Scripts\\yt-dlp.exe" if _is_windows else "bin/yt-dlp")
+YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
 PIPELINE_SCRIPT = APP_DIR / "apps" / "reel_builder" / "pipeline.py"
 UPLOAD_SCRIPT = APP_DIR / "apps" / "uploader" / "upload_youtube.py"
 STATE_FILE = APP_DIR / "apps" / "shared" / "data" / "processed_videos.json"
@@ -170,17 +171,17 @@ def get_video_duration_secs(service, video_id: str) -> int | None:
 def download_video(video_id: str, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(output_dir / f"{video_id}.%(ext)s")
-    result = subprocess.run(
-        [
-            str(VENV_YTDLP),
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
-            "--output", output_template,
-            "--merge-output-format", "mp4",
-            f"https://www.youtube.com/watch?v={video_id}",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    cmd = [
+        str(VENV_YTDLP),
+        "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "--output", output_template,
+        "--merge-output-format", "mp4",
+        "--js-runtimes", "node",
+    ]
+    if YTDLP_COOKIES_FILE:
+        cmd += ["--cookies", YTDLP_COOKIES_FILE]
+    cmd.append(f"https://www.youtube.com/watch?v={video_id}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed:\n{result.stderr[-500:]}")
     downloaded = list(output_dir.glob(f"{video_id}.*"))

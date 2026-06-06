@@ -22,6 +22,7 @@
       - libglib2.0-0t64
       - htop
       - ufw
+      - nodejs  # required by yt-dlp EJS challenge solver (must be v22+)
     state: present
 
 - name: Create app user
