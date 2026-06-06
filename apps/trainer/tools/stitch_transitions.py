@@ -54,8 +54,8 @@ def stitch(clips: list[Path], output: Path) -> bool:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--max",  type=int, default=100)
-    p.add_argument("--src",  default="training-data/transition")
-    p.add_argument("--dst",  default="training-data/ea_transition")
+    p.add_argument("--src",  default="apps/shared/training-data/transition")
+    p.add_argument("--dst",  default="apps/shared/training-data/ea_transition")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 

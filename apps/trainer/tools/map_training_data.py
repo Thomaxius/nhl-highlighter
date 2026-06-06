@@ -165,8 +165,8 @@ def map_data(src_root: Path, dst_root: Path, dry_run: bool, max_other: int | Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Map training-data -> data/labeled")
-    parser.add_argument("--src", default="training-data", help="Source root folder")
-    parser.add_argument("--dst", default="data/labeled", help="Destination root folder")
+    parser.add_argument("--src", default="apps/shared/training-data", help="Source root folder")
+    parser.add_argument("--dst", default="apps/shared/data/labeled", help="Destination root folder")
     parser.add_argument("--dry_run", action="store_true", help="Print plan without copying")
     parser.add_argument("--clear_dst", action="store_true", help="Wipe dst before copying")
     parser.add_argument("--max_other", type=int, default=None, help="Cap files copied into 'other'")

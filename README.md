@@ -34,37 +34,31 @@ nhl-highlighter/
 │   │   └── youtube_watcher.py       # YouTube polling daemon
 │   ├── reel_builder/
 │   │   ├── pipeline.py              # End-to-end CLI entry point
+│   │   ├── configs/                 # Template images and config.yaml
+│   │   │   ├── config.yaml
+│   │   │   ├── goal_banner_template*.png
+│   │   │   ├── game_end_template.png
+│   │   │   ├── vs_screen_template.png
+│   │   │   └── pause_menu_template.png
 │   │   ├── src/
 │   │   │   ├── ingestion/           # FFmpeg normalisation
 │   │   │   ├── preprocessing/       # Scene splitting, audio analysis
 │   │   │   ├── detection/           # VideoMAE classifier + template detectors
 │   │   │   ├── assembly/            # FFmpeg concat + overlays
-│   │   │   ├── training/            # Dataset + HuggingFace Trainer
 │   │   │   └── utils/
-│   │   └── tools/                   # Dev/labelling helpers
-│   │       ├── label_segments.py
-│   │       ├── preprocess_videos.py
-│   │       ├── debug_banner.py
-│   │       └── ...
-│   └── uploader/
-│       └── upload_youtube.py        # YouTube upload CLI
-├── configs/
-│   ├── config.yaml                  # Tunable parameters
-│   ├── goal_banner_template*.png    # GOAL! HUD banner templates
-│   ├── game_end_template.png
-│   ├── vs_screen_template.png
-│   └── pause_menu_template.png
+│   │   └── tools/                   # Dev helpers (debug_banner, etc.)
+│   ├── trainer/
+│   │   ├── src/training/            # Dataset + HuggingFace Trainer
+│   │   └── tools/                   # label_segments, map_training_data, etc.
+│   ├── uploader/
+│   │   └── upload_youtube.py        # YouTube upload CLI
+│   └── shared/
+│       ├── data/                    # Runtime data (raw, processed, exports, labeled)
+│       ├── models/                  # Model checkpoints and exports
+│       └── training-data/           # Raw source clips by category
 ├── config/
 │   ├── client_secrets.json          # OAuth 2.0 credentials (not in git)
 │   └── token.json                   # Cached OAuth token (not in git)
-├── data/
-│   ├── raw/                         # Source clips from PS5
-│   ├── processed/                   # Normalised clips + scene segments
-│   ├── labeled/                     # Training data (subfolders = class names)
-│   └── exports/                     # Finished highlight reels
-├── models/
-│   ├── checkpoints/                 # Fine-tuned VideoMAE checkpoint
-│   └── exported/                    # ONNX / quantised exports
 ├── infra/
 │   └── ansible/                     # Server provisioning playbooks
 ├── tests/
@@ -142,14 +136,14 @@ Processes a raw game recording and produces a highlight reel.
 
 **Run:**
 ```bash
-python apps/reel_builder/pipeline.py --input data/raw
+python apps/reel_builder/pipeline.py --input apps/shared/data/raw
 ```
 
 Optional flags:
 ```bash
 python apps/reel_builder/pipeline.py \
-    --input data/raw \
-    --checkpoint models/checkpoints/videomae_nhl \
+    --input apps/shared/data/raw \
+    --checkpoint apps/shared/models/checkpoints/videomae_nhl \
     --music path/to/music.mp3 \
     --max_clips 10
 ```
@@ -222,9 +216,9 @@ data/labeled/
 
 Use the interactive labelling tool:
 ```bash
-python apps/reel_builder/tools/label_segments.py \
-    --segments data/processed/segments/<game_folder> \
-    --output data/labeled
+python apps/trainer/tools/label_segments.py \
+    --segments apps/shared/data/processed/segments/<game_folder> \
+    --output apps/shared/data/labeled
 ```
 
 Keyboard shortcuts: `g` goal · `c` celebration · `r` goal_replay · `n` other_replay · `s` scoring_chance · `t` transition · `o` other · `SPACE` skip · `q` quit
@@ -236,9 +230,9 @@ Keyboard shortcuts: `g` goal · `c` celebration · `r` goal_replay · `n` other_
 Training requires a GPU. Use [Runpod](https://runpod.io) or [Lambda Labs](https://lambdalabs.com) (~$0.50/hr).
 
 ```bash
-python -m apps.reel_builder.src.training.trainer \
-    --data_dir data/labeled \
-    --output_dir models/checkpoints/videomae_nhl \
+python -m apps.trainer.src.training.trainer \
+    --data_dir apps/shared/data/labeled \
+    --output_dir apps/shared/models/checkpoints/videomae_nhl \
     --epochs 10 \
     --batch_size 4
 ```
@@ -445,60 +439,4 @@ python scripts/label_segments.py \
 
 Keyboard shortcuts: `g` goal · `c` celebration · `r` goal_replay · `n` other_replay · `s` scoring_chance · `t` transition · `o` other · `SPACE` skip · `q` quit
 
----
 
-## Training
-
-Training requires a GPU. Use [Runpod](https://runpod.io) or [Lambda Labs](https://lambdalabs.com) (RTX 4090 ~$0.50/hr) for cloud training.
-
-```bash
-python -m src.training.trainer \
-    --data_dir data/labeled \
-    --output_dir models/checkpoints/videomae_nhl \
-    --epochs 10 \
-    --batch_size 4
-```
-
-Track experiments at [wandb.ai](https://wandb.ai) — set `WANDB_API_KEY` in your environment first.
-
-The trainer saves checkpoints to `models/checkpoints/videomae_nhl/`. Use the final checkpoint (or the best validation checkpoint) when running the pipeline.
-
----
-
-## Template Images
-
-The detectors that use OpenCV template matching require cropped reference images in `configs/`. If you're setting up fresh or the templates don't match your capture setup, replace them:
-
-| File | What to crop | Used by |
-|---|---|---|
-| `goal_banner_template*.png` | The "GOAL!" text banner from the HUD | Banner detector |
-| `game_end_template.png` | The clock region (top-left HUD area) | Game clock detector |
-| `vs_screen_template.png` | Any distinctive part of the VS matchup screen | VS screen detector |
-| `pause_menu_template.png` | Top-left ~250×80px of the pause/ESC menu screen | Pause menu detector |
-
-Multiple `goal_banner_template` files are supported (numbered 1–N) to handle different team banner colours.
-
----
-
-## Tech Stack
-
-| Layer | Tools |
-|---|---|
-| Video processing | FFmpeg, OpenCV, PySceneDetect |
-| Audio analysis | librosa |
-| OCR | Tesseract (via pytesseract) |
-| Model | VideoMAE (HuggingFace Transformers) |
-| Training | PyTorch, HuggingFace Trainer |
-| Experiment tracking | Weights & Biases |
-
----
-
-## Development
-
-```bash
-# Run tests
-pytest tests/
-
-# Format
-black src/ && ruff check src/
-```

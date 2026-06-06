@@ -49,9 +49,9 @@ UPLOAD_PRIVACY = os.environ.get("UPLOAD_PRIVACY", "unlisted")
 VENV_PYTHON = APP_DIR / "venv" / "bin" / "python"
 PIPELINE_SCRIPT = APP_DIR / "apps" / "reel_builder" / "pipeline.py"
 UPLOAD_SCRIPT = APP_DIR / "apps" / "uploader" / "upload_youtube.py"
-STATE_FILE = APP_DIR / "data" / "processed_videos.json"
-RAW_DIR = APP_DIR / "data" / "raw"
-EXPORTS_DIR = APP_DIR / "data" / "exports"
+STATE_FILE = APP_DIR / "apps" / "shared" / "data" / "processed_videos.json"
+RAW_DIR = APP_DIR / "apps" / "shared" / "data" / "raw"
+EXPORTS_DIR = APP_DIR / "apps" / "shared" / "data" / "exports"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_dir = APP_DIR / "logs"

@@ -44,6 +44,6 @@
       - "1. Edit {{ app_dir }}/config/watcher.env — fill in YOUTUBE_CHANNEL_ID"
       - "2. Run OAuth consent locally (once): set env vars and run youtube_watcher.py interactively to generate token.json"
       - "3. Upload OAuth credentials: scp config/client_secrets.json config/token.json root@SERVER:{{ app_dir }}/config/"
-      - "4. Upload model checkpoint: scp -r models/checkpoints/videomae_nhl root@SERVER:{{ app_dir }}/models/checkpoints/"
+      - "4. Upload model checkpoint: scp -r apps/shared/models/checkpoints/videomae_nhl root@SERVER:{{ app_dir }}/apps/shared/models/checkpoints/"
       - "5. Restart watcher: systemctl restart nhl-watcher"
       - "6. Check logs: journalctl -u nhl-watcher -f"

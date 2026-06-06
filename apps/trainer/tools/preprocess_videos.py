@@ -73,7 +73,7 @@ def _process_one(args_tuple: tuple) -> tuple[str, str]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Pre-decode videos to .npy frame caches")
-    p.add_argument("--data_dir",   default="data/labeled", help="Root of labeled data")
+    p.add_argument("--data_dir",   default="apps/shared/data/labeled", help="Root of labeled data")
     p.add_argument("--num_frames", type=int, default=16,   help="Frames per clip (must match training)")
     p.add_argument("--workers",    type=int, default=8,    help="Parallel worker processes (default: 8)")
     p.add_argument("--force",      action="store_true",    help="Re-encode even if .npy already exists")

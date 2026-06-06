@@ -31,13 +31,15 @@ ENV/
 *.jpeg
 
 # ── Config templates (keep these tracked) ────────────────────────────────────
-!configs/*.png
+!apps/reel_builder/configs/*.png
 
 # ── OAuth credentials — never commit ─────────────────────────────────────────
 config/client_secrets.json
 configs/client_secrets.json
+apps/reel_builder/configs/client_secrets.json
 config/token.json
 configs/token.json
+apps/reel_builder/configs/token.json
 
 # ── Model weights ─────────────────────────────────────────────────────────────
 *.pt
@@ -45,17 +47,22 @@ configs/token.json
 *.safetensors
 *.onnx
 *.bin
+*.npy
 
-# Data — never commit raw video or models to git
-data/raw/
-data/processed/
-data/exports/
-data/labeled/
-data/found/
-data/transitions/
+# Data — never commit raw video, processed data, or model weights to git
+apps/shared/data/raw/
+apps/shared/data/processed/
+apps/shared/data/exports/
+apps/shared/data/labeled/
+apps/shared/data/found/
+apps/shared/data/transitions/
+apps/shared/data/processed_videos.json
+apps/shared/models/checkpoints/
+apps/shared/models/exported/
 goals/
-models/checkpoints/
-models/exported/
+
+# macOS resource fork / metadata files
+._*
 
 # But always keep placeholder files that preserve folder structure
 !**/.gitkeep

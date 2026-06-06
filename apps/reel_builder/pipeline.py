@@ -216,7 +216,7 @@ def _infer_goals_from_faceoff_pattern(results: list[dict]) -> list[dict]:
 def run_pipeline(
     input_dir: str,
     output_path: str,
-    checkpoint: str = "models/checkpoints/videomae_nhl",
+    checkpoint: str = "apps/shared/models/checkpoints/videomae_nhl",
     music_path: str | None = None,
     max_clips: int = 20,
     min_confidence: float = 0.55,
@@ -224,9 +224,9 @@ def run_pipeline(
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
-    processed_dir = Path("data/processed")
-    segments_dir = Path("data/processed/segments")
-    audio_dir = Path("data/processed/audio")
+    processed_dir = Path("apps/shared/data/processed")
+    segments_dir = Path("apps/shared/data/processed/segments")
+    audio_dir = Path("apps/shared/data/processed/audio")
 
     # ── Step 1: Ingest & normalise ───────────────────────────────────────────
     logger.info("━━━  Step 1: Ingesting clips  ━━━")
@@ -348,7 +348,7 @@ def run_pipeline(
                         )
                         break  # each goal event maps to exactly one segment
     else:
-        logger.info("Skipping banner detection (no templates found in configs/)")
+        logger.info("Skipping banner detection (no templates found in apps/reel_builder/configs/)")
 
     # ── Step 4c: Banner is the ground truth — hard override ──────────────────
     # If the GOAL! banner was detected, the segment IS a goal, period.
@@ -393,7 +393,7 @@ def run_pipeline(
     # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
     # states. Segments covering the final ~60s before game end are tagged
     # game_end=True so the reel builder always appends them.
-    clock_template = Path("configs/game_end_template.png")
+    clock_template = Path("apps/reel_builder/configs/game_end_template.png")
     if clock_template.exists():
         logger.info("━━━  Step 4d: Game clock detection  ━━━")
         clock_detector = GameClockDetector(template_path=clock_template)
@@ -514,7 +514,7 @@ def run_pipeline(
                             )
                             break
     else:
-        logger.info("Skipping game clock detection (configs/game_end_template.png not found)")
+        logger.info("Skipping game clock detection (apps/reel_builder/configs/game_end_template.png not found)")
 
     # ── Step 4d.5: VS screen → intro segment tagging ─────────────────────────
     # Clip starts 6 s after the VS screen first appears and runs through
@@ -522,7 +522,7 @@ def run_pipeline(
     # Tagged segments carry trim offsets so the reel builder can cut precisely:
     #   intro_clip_start_s — seconds from the first tagged segment's start
     #   intro_clip_end_s   — seconds from the first tagged segment's start
-    vs_template = Path("configs/vs_screen_template3.png")
+    vs_template = Path("apps/reel_builder/configs/vs_screen_template3.png")
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
     FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
@@ -531,7 +531,7 @@ def run_pipeline(
     if vs_template.exists():
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
         vs_detector = VsScreenDetector(template_path=vs_template)
-        fallback_pause_template = Path("configs/pause_menu_template.png")
+        fallback_pause_template = Path("apps/reel_builder/configs/pause_menu_template.png")
         fallback_pause_detector = (
             PauseMenuDetector(template_path=fallback_pause_template)
             if fallback_pause_template.exists() else None
@@ -713,7 +713,7 @@ def run_pipeline(
                     intro_start, intro_end, tagged,
                 )
     else:
-        logger.info("Skipping VS screen detection (configs/vs_screen_template3.png not found)")
+        logger.info("Skipping VS screen detection (apps/reel_builder/configs/vs_screen_template3.png not found)")
 
     # ── Step 4d.9: Pause-menu detection ────────────────────────────────────
     # Runs AFTER intro and game_end tagging so those guards work correctly.
@@ -721,11 +721,11 @@ def run_pipeline(
     # Skips intro/game_end segments (those are assembled directly, not scored).
     # Special case: if the END OF GAME menu template (pause_menu_template_end_of_game.png)
     # fires, the segment is tagged game_end=True instead of being demoted.
-    pause_template = Path("configs/pause_menu_template.png")
+    pause_template = Path("apps/reel_builder/configs/pause_menu_template.png")
     if pause_template.exists():
         logger.info("━━━  Step 4d.9: Pause-menu detection  ━━━")
         pause_detector = PauseMenuDetector(template_path=pause_template)
-        eog_template_path = Path("configs/pause_menu_template_end_of_game.png")
+        eog_template_path = Path("apps/reel_builder/configs/pause_menu_template_end_of_game.png")
         eog_detector = PauseMenuDetector(template_path=eog_template_path) if eog_template_path.exists() else None
         if eog_detector:
             logger.info("  EOG menu detector loaded (%s)", eog_template_path.name)
@@ -763,7 +763,7 @@ def run_pipeline(
         if eog_tagged:
             logger.info("  Tagged %d segment(s) as END OF GAME via menu template.", eog_tagged)
     else:
-        logger.info("Skipping pause-menu detection (configs/pause_menu_template.png not found)")
+        logger.info("Skipping pause-menu detection (apps/reel_builder/configs/pause_menu_template.png not found)")
 
     # ── Step 4f: Chain goal → celebration → replay ───────────────────────────
     logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
@@ -799,10 +799,10 @@ def main():
 
     src = p.add_mutually_exclusive_group()
     src.add_argument("--file",   metavar="FILE",   help="Single raw .mp4 to process")
-    src.add_argument("--folder", metavar="FOLDER", help="Folder of raw .mp4 clips (default: data/raw)")
+    src.add_argument("--folder", metavar="FOLDER", help="Folder of raw .mp4 clips (default: apps/shared/data/raw)")
 
-    p.add_argument("--output", default="data/exports/reel.mp4", help="Output reel path")
-    p.add_argument("--checkpoint", default="models/checkpoints/videomae_nhl")
+    p.add_argument("--output", default="apps/shared/data/exports/reel.mp4", help="Output reel path")
+    p.add_argument("--checkpoint", default="apps/shared/models/checkpoints/videomae_nhl")
     p.add_argument("--music", default=None, help="Optional background music file")
     p.add_argument("--max_clips", type=int, default=20)
     p.add_argument("--min_confidence", type=float, default=0.55)
@@ -819,7 +819,7 @@ def main():
         os.link(file_path, Path(tmp) / file_path.name)   # hardlink — instant, no extra disk
         input_dir = tmp
     else:
-        input_dir = args.folder or "data/raw"
+        input_dir = args.folder or "apps/shared/data/raw"
 
     log_file = _setup_file_logging(args.output)
     logger.info("Logging to %s", log_file)

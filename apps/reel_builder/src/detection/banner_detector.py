@@ -67,8 +67,8 @@ class BannerDetector:
 
         # ── Resolve template paths ────────────────────────────────────────
         if template_path is None:
-            # Auto-discover all goal_banner_template*.png in configs/
-            paths = sorted(Path("configs").glob("goal_banner_template*.png"))
+            # Auto-discover all goal_banner_template*.png in apps/reel_builder/configs/
+            paths = sorted(Path("apps/reel_builder/configs").glob("goal_banner_template*.png"))
         elif isinstance(template_path, list):
             paths = [Path(p) for p in template_path]
         else:
@@ -352,11 +352,11 @@ class AssistsBannerDetector:
         self.scale_factors = scale_factors or [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
         if template_path is None:
-            # Auto-discover any after_goal_assists_template*.png in configs/
-            candidates = sorted(Path("configs").glob("after_goal_assists_template*.png"))
+            # Auto-discover any after_goal_assists_template*.png in apps/reel_builder/configs/
+            candidates = sorted(Path("apps/reel_builder/configs").glob("after_goal_assists_template*.png"))
             if not candidates:
                 raise FileNotFoundError(
-                    "No assists banner templates found in configs/after_goal_assists_template*.png"
+                    "No assists banner templates found in apps/reel_builder/configs/after_goal_assists_template*.png"
                 )
             tp = candidates[-1]  # use the latest version
         else:

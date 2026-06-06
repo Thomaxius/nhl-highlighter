@@ -134,8 +134,8 @@ def label_segments(segments_dir: Path, labeled_dir: Path) -> None:
 
 def main():
     p = argparse.ArgumentParser(description="Interactive segment labeler")
-    p.add_argument("--segments_dir", default="data/processed/segments")
-    p.add_argument("--labeled_dir", default="data/labeled")
+    p.add_argument("--segments_dir", default="apps/shared/data/processed/segments")
+    p.add_argument("--labeled_dir", default="apps/shared/data/labeled")
     args = p.parse_args()
 
     label_segments(

@@ -43,14 +43,17 @@
     group: "{{ app_user }}"
     mode: "0755"
   loop:
-    - "{{ app_dir }}/data/raw"
-    - "{{ app_dir }}/data/processed"
-    - "{{ app_dir }}/data/exports"
-    - "{{ app_dir }}/data/labeled"
+    - "{{ app_dir }}/apps/shared/data/raw"
+    - "{{ app_dir }}/apps/shared/data/processed"
+    - "{{ app_dir }}/apps/shared/data/exports"
+    - "{{ app_dir }}/apps/shared/data/labeled"
     - "{{ app_dir }}/logs"
-    - "{{ app_dir }}/models/checkpoints"
+    - "{{ app_dir }}/apps/shared/models/checkpoints"
     - "{{ app_dir }}/config"
-    - "{{ app_dir }}/scripts"
+    - "{{ app_dir }}/apps/poller"
+    - "{{ app_dir }}/apps/reel_builder"
+    - "{{ app_dir }}/apps/uploader"
+    - "{{ app_dir }}/apps/trainer"
 
 - name: Create virtualenv
   become_user: "{{ app_user }}"

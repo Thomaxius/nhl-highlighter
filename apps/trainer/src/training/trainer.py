@@ -206,8 +206,8 @@ def train(
 
 def _parse_args():
     p = argparse.ArgumentParser(description="Fine-tune VideoMAE on NHL segments")
-    p.add_argument("--data_dir", default="data/labeled")
-    p.add_argument("--output_dir", default="models/checkpoints/videomae_nhl")
+    p.add_argument("--data_dir", default="apps/shared/data/labeled")
+    p.add_argument("--output_dir", default="apps/shared/models/checkpoints/videomae_nhl")
     p.add_argument("--base_model", default="MCG-NJU/videomae-base")
     p.add_argument("--num_frames", type=int, default=16)
     p.add_argument("--epochs", type=int, default=20)

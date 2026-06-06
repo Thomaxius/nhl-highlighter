@@ -46,5 +46,5 @@
   ansible.builtin.debug:
     msg: >-
       REMINDER: Upload your trained model to the server after this playbook
-      completes: scp -r models/checkpoints/videomae_nhl
-      root@YOUR_SERVER_IP:{{ app_dir }}/models/checkpoints/
+      completes: scp -r apps/shared/models/checkpoints/videomae_nhl
+      root@YOUR_SERVER_IP:{{ app_dir }}/apps/shared/models/checkpoints/
