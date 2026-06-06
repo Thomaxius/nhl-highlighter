@@ -40,7 +40,7 @@ class VsScreenDetector:
 
     def __init__(
         self,
-        template_path: str | Path = "configs/vs_screen_template3.png",
+        template_path: str | Path = "apps/reel_builder/configs/vs_screen_template3.png",
         threshold: float = MIN_CONF,
     ) -> None:
         template_path = Path(template_path)

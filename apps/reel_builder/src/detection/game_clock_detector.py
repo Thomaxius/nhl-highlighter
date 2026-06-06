@@ -62,8 +62,8 @@ class GameClockDetector:
 
     def __init__(
         self,
-        template_path: str | Path = "configs/game_end_template.png",
-        ot_template_path: str | Path = "configs/game_clock_ot.png",
+        template_path: str | Path = "apps/reel_builder/configs/game_end_template.png",
+        ot_template_path: str | Path = "apps/reel_builder/configs/game_clock_ot.png",
         template_threshold: float = MIN_TEMPLATE_CONF,
         scale_factors: list[float] | None = None,
     ) -> None:

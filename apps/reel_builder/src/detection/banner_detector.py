@@ -43,9 +43,9 @@ class BannerDetector:
 
     Args:
         template_path:  Path to a .png template, a list of paths, or a glob
-                        pattern string (e.g. "configs/goal_banner_template*.png").
+                        pattern string (e.g. "apps/reel_builder/configs/goal_banner_template*.png").
                         Defaults to auto-discovering all
-                        configs/goal_banner_template*.png files.
+                        apps/reel_builder/configs/goal_banner_template*.png files.
         threshold:      Match confidence threshold (0–1). Default 0.75.
         sample_frames:  How many frames to sample per segment.
         scale_factors:  Template scales to try (handles slight resolution differences).

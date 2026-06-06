@@ -270,7 +270,7 @@ def run_pipeline(
     # source).  After finding banner timestamps we map them back to the
     # correct segment using a cumulative timeline.
     import cv2 as _cv2
-    templates = sorted(Path("configs").glob("goal_banner_template*.png"))
+    templates = sorted(Path("apps/reel_builder/configs").glob("goal_banner_template*.png"))
     if templates:
         logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(templates))
         detector = BannerDetector()  # auto-loads all matching templates

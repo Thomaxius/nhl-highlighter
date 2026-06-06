@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 ROI_Y2 = 0.20   # top 20% of height  (covers both PAUSE ~80px and END OF GAME ~150px templates)
 ROI_X2 = 0.35   # left 35% of width  (covers both PAUSE ~250px and END OF GAME ~500px templates)
 
-DEFAULT_TEMPLATE  = "configs/pause_menu_template.png"
+DEFAULT_TEMPLATE  = "apps/reel_builder/configs/pause_menu_template.png"
 DEFAULT_THRESHOLD = 0.65   # gameplay peaks at ~0.36; menu at ~0.89
 DEFAULT_SAMPLES   = 6      # frames to sample per segment
 
