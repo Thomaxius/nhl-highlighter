@@ -88,4 +88,11 @@
   become_user: "{{ app_user }}"
   ansible.builtin.pip:
     requirements: "{{ app_dir }}/requirements-server.txt"
+
+- name: Install yt-dlp
+  become_user: "{{ app_user }}"
+  ansible.builtin.pip:
+    name: yt-dlp
+    state: latest
+    virtualenv: "{{ venv_dir }}"
     virtualenv: "{{ venv_dir }}"
