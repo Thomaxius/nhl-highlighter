@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # Default intro/outro duration in seconds
 FADE_DURATION = 0.5
 
+# Hard cap on the final reel length. YouTube (and sanity) will reject absurdly
+# long uploads, so we trim the output as a last-resort safety net regardless of
+# how the assembly stage behaved.
+MAX_REEL_DURATION_S = 15 * 60
+
 
 def build_reel(
     segments: list[dict],
@@ -317,7 +322,7 @@ def build_reel(
             "\n".join(f"file '{str(c)}'" for c in faded_clips)
         )
         concat_out = tmp / "concat.mp4"
-        _ffmpeg_concat(concat_list, concat_out)
+        _ffmpeg_concat_final(concat_list, concat_out)
 
         # Step 4: Mix in background music (optional)
         if music_path and Path(music_path).exists():
@@ -528,6 +533,9 @@ def _probe_duration(path: Path) -> float | None:
 
 
 def _ffmpeg_concat(concat_list: Path, output: Path) -> None:
+    # Fast stream-copy concat for intermediate merges. The resulting clip is
+    # always re-encoded again downstream (_add_fades), so any timestamp quirks
+    # here are reset before the final output is produced.
     cmd = [
         "ffmpeg", "-y",
         "-f", "concat",
@@ -539,6 +547,31 @@ def _ffmpeg_concat(concat_list: Path, output: Path) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Concat failed:\n{result.stderr[-300:]}")
+
+
+def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
+    # Final concat: re-encode and regenerate timestamps rather than -c copy.
+    # The concat demuxer with stream-copy preserves each input's original packet
+    # PTS; when a segment carries a bad/non-monotonic timestamp the output
+    # duration balloons to ~24h and playback freezes partway through. All inputs
+    # are already uniform libx264/aac, so this re-encode is cheap and produces
+    # clean, monotonic presentation timestamps.
+    cmd = [
+        "ffmpeg", "-y",
+        "-fflags", "+genpts",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_list),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-c:a", "aac", "-ar", "44100",
+        "-vsync", "cfr",
+        "-avoid_negative_ts", "make_zero",
+        "-max_interleave_delta", "0",
+        str(output),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Final concat failed:\n{result.stderr[-300:]}")
 
 
 def _mix_music(video: Path, music: Path, output: Path) -> None:
