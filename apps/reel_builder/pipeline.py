@@ -192,6 +192,10 @@ def _infer_goals_from_faceoff_pattern(
         # Skip already-confirmed goals
         if seg.get("banner_detected") or seg.get("inferred_goal"):
             continue
+        # A period-end buzzer moment looks structurally identical to a post-goal
+        # sequence (replay → faceoff cutscene) — never promote it as a goal
+        if seg.get("period_end") or seg.get("period_start") or seg.get("game_start"):
+            continue
         # Candidate: ML thought this was a goal or scoring chance
         ml = seg.get("ml_label", seg.get("label"))
         if ml not in {"goal", "scoring_chance"}:
