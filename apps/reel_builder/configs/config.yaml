@@ -13,8 +13,9 @@ goal_chaining:
 
 # ── Faceoff-pattern goal inference ────────────────────────────────────────────
 goal_inference:
-  max_lookahead: 6          # faceoff cutscene must appear within this many segments
+  max_lookahead: 5          # faceoff cutscene must appear within this many virtual steps
   min_sc_confidence: 0.45   # scoring_chance must be at least this confident to be promoted
+  min_faceoff_confidence: 0.60  # faceoff/faceoff_cutscene must be at least this confident to trigger
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 ingestion:
@@ -24,8 +25,8 @@ ingestion:
 
 # ── Scene detection ───────────────────────────────────────────────────────────
 scene_detection:
-  threshold: 18.0           # ContentDetector threshold (lower = more cuts)
-  min_scene_len: 15         # Minimum scene length in frames
+  threshold: 20.0           # ContentDetector threshold (lower = more cuts)
+  min_scene_len: 20         # Minimum scene length in frames
   max_scene_duration_s: 45  # Force-split any scene longer than this (seconds)
 
 # ── Audio analysis ────────────────────────────────────────────────────────────
