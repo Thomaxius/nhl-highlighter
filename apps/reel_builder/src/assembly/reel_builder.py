@@ -305,8 +305,11 @@ def build_reel(
                 else:
                     src = base
             elif lead.get("period_transition"):
-                # ── Period-transition animation — use as-is (already normalized) ──
-                src = Path(lead["path"])
+                # ── Period-transition animation — loudnorm to match game footage ──
+                src_raw = Path(lead["path"])
+                src_normed = tmp / f"group_{group_idx:03d}_transition_loud.mp4"
+                _loudnorm_audio(src_raw, src_normed)
+                src = src_normed if src_normed.exists() else src_raw
             elif lead.get("label") == "scoring_chance" and len(group) > 1:
                 # ── Scoring chance with chained replay: trim lead then concat ──
                 if "trim_start_s" in lead and "trim_end_s" in lead:
@@ -485,6 +488,27 @@ def _ffmpeg_trim_start(src: Path, dst: Path, start_s: float) -> None:
             shutil.copy2(src, dst)
         else:
             logger.error("Trim-start fallback failed — source does not exist: %s", src)
+
+
+def _loudnorm_audio(src: Path, dst: Path, target_lufs: float = -23.0) -> None:
+    """Re-encode *src* applying EBU R128 loudness normalisation to *target_lufs*.
+
+    A single-pass loudnorm is sufficient here — we just need the transition
+    clip to sit at roughly the same perceived volume as the surrounding game
+    footage rather than booming over it.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(src),
+        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("loudnorm failed for %s (rc=%d) — using original audio.",
+                       src.name, result.returncode)
 
 
 def _ffmpeg_trim(src: Path, dst: Path, start_s: float, end_s: float) -> None:
