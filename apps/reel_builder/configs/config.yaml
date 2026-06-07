@@ -2,8 +2,19 @@
 pipeline:
   max_clips: 20
   min_confidence: 0.55
+  sc_min_confidence: 0.45   # minimum confidence for scoring_chance clips to enter reel
   add_overlays: true
   music_path: null          # set to a .mp3 path to add background music
+
+# ── Goal chaining (goal → celebration → replay sequence) ──────────────────────
+goal_chaining:
+  max_lookahead: 25         # max segments to scan after a goal for celebration/replay
+  max_gap_s: 10.0           # stop chaining if >Xs of non-highlight content accumulates
+
+# ── Faceoff-pattern goal inference ────────────────────────────────────────────
+goal_inference:
+  max_lookahead: 6          # faceoff cutscene must appear within this many segments
+  min_sc_confidence: 0.45   # scoring_chance must be at least this confident to be promoted
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 ingestion:

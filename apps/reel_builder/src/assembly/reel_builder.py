@@ -29,7 +29,7 @@ def build_reel(
     music_path: Optional[str | Path] = None,
     max_clips: int = 20,
     min_confidence: float = 0.55,
-    sc_min_confidence: float = 0.35,
+    sc_min_confidence: float = 0.45,
     add_overlays: bool = True,
 ) -> Path:
     """

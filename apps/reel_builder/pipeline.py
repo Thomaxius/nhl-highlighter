@@ -19,6 +19,12 @@ import datetime
 import logging
 from pathlib import Path
 
+import yaml
+
+_CONFIG_PATH = Path(__file__).parent / "configs" / "config.yaml"
+with _CONFIG_PATH.open() as _f:
+    _CFG = yaml.safe_load(_f)
+
 from src.ingestion.ingest import ingest_clips
 from src.preprocessing.scene_splitter import split_into_scenes
 from src.preprocessing.audio_analyzer import extract_audio, detect_energy_spikes, score_segments_by_audio
@@ -54,7 +60,11 @@ def _setup_file_logging(output_path) -> Path:
     return log_file
 
 
-def _chain_goal_sequences(results: list[dict]) -> list[dict]:
+def _chain_goal_sequences(
+    results: list[dict],
+    max_lookahead: int = _CFG["goal_chaining"]["max_lookahead"],
+    max_gap_s: float = _CFG["goal_chaining"]["max_gap_s"],
+) -> list[dict]:
     """
     After a banner-detected or faceoff-inferred goal segment, look ahead and
     tag the immediately following celebration and replay segments so they are
@@ -79,8 +89,8 @@ def _chain_goal_sequences(results: list[dict]) -> list[dict]:
     - MAX_LOOKAHEAD segments have been checked
     """
     FOLLOW_LABELS = {"celebration", "goal_replay"}
-    MAX_LOOKAHEAD = 15
-    MAX_GAP_S = 10.0   # stop chaining if >10s of non-highlight content
+    MAX_LOOKAHEAD = max_lookahead
+    MAX_GAP_S = max_gap_s
 
     goal_indices = [i for i, r in enumerate(results) if r.get("banner_detected") or r.get("inferred_goal")]
 
@@ -157,7 +167,11 @@ def _get_clip_duration(video_path) -> float:
     return frames / fps
 
 
-def _infer_goals_from_faceoff_pattern(results: list[dict]) -> list[dict]:
+def _infer_goals_from_faceoff_pattern(
+    results: list[dict],
+    max_lookahead: int = _CFG["goal_inference"]["max_lookahead"],
+    min_sc_confidence: float = _CFG["goal_inference"]["min_sc_confidence"],
+) -> list[dict]:
     """
     Infer goals from the post-goal sequence when banner detection fails.
 
@@ -169,7 +183,8 @@ def _infer_goals_from_faceoff_pattern(results: list[dict]) -> list[dict]:
     within the lookahead window, it is promoted to `goal` (inferred_goal=True).
     These inferred goals are then chained by _chain_goal_sequences.
     """
-    MAX_LOOKAHEAD = 15
+    MAX_LOOKAHEAD = max_lookahead
+    MIN_SC_CONF = min_sc_confidence
 
     promoted = 0
     for i, seg in enumerate(results):
@@ -181,6 +196,9 @@ def _infer_goals_from_faceoff_pattern(results: list[dict]) -> list[dict]:
         if ml not in {"goal", "scoring_chance"}:
             continue
         if seg.get("label") not in {"scoring_chance", "other"}:
+            continue
+        # Weak scoring-chance predictions are unlikely to be real goals
+        if ml == "scoring_chance" and seg.get("confidence", 0.0) < MIN_SC_CONF:
             continue
 
         for j in range(1, MAX_LOOKAHEAD + 1):
@@ -218,9 +236,9 @@ def run_pipeline(
     output_path: str,
     checkpoint: str = "apps/shared/models/checkpoints/videomae_nhl",
     music_path: str | None = None,
-    max_clips: int = 20,
-    min_confidence: float = 0.55,
-    sc_min_confidence: float = 0.35,
+    max_clips: int = _CFG["pipeline"]["max_clips"],
+    min_confidence: float = _CFG["pipeline"]["min_confidence"],
+    sc_min_confidence: float = _CFG["pipeline"]["sc_min_confidence"],
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -804,10 +822,10 @@ def main():
     p.add_argument("--output", default="apps/shared/data/exports/reel.mp4", help="Output reel path")
     p.add_argument("--checkpoint", default="apps/shared/models/checkpoints/videomae_nhl")
     p.add_argument("--music", default=None, help="Optional background music file")
-    p.add_argument("--max_clips", type=int, default=20)
-    p.add_argument("--min_confidence", type=float, default=0.55)
-    p.add_argument("--sc_min_confidence", type=float, default=0.35,
-                   help="Min confidence for scoring_chance clips (default: 0.35)")
+    p.add_argument("--max_clips", type=int, default=_CFG["pipeline"]["max_clips"])
+    p.add_argument("--min_confidence", type=float, default=_CFG["pipeline"]["min_confidence"])
+    p.add_argument("--sc_min_confidence", type=float, default=_CFG["pipeline"]["sc_min_confidence"],
+                   help="Min confidence for scoring_chance clips")
     args = p.parse_args()
 
     if args.file:
