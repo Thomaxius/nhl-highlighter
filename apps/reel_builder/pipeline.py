@@ -238,26 +238,51 @@ def _infer_goals_from_faceoff_pattern(
         if ml == "scoring_chance" and seg.get("confidence", 0.0) < MIN_SC_CONF:
             continue
 
-        # Guard against promoting a replay frame from a PRIOR goal's sequence.
-        # A real goal's in-game replay frequently contains a clip the classifier
-        # labels `goal` (the puck visibly entering the net). If a confirmed goal
-        # occurred recently and no faceoff (cutscene or bare) has happened since,
-        # we are still inside that goal's post-goal sequence — play has not
-        # resumed, so this candidate cannot be a new goal. A genuine second goal
-        # is always preceded by a faceoff (the prior sequence ended, play
-        # resumed, then the puck went in again).
+        # Backward scan: determine whether this candidate is in normal play,
+        # inside a prior goal's replay tail, or in an inter-period intermission.
+        #
+        # Walk backward through the results list and stop at the first
+        # meaningful boundary, then classify the candidate accordingly:
+        #
+        #   game_start / period_start first
+        #       → puck has already dropped in this period; normal play → allow
+        #   period_end first (no puck-drop seen between it and the candidate)
+        #       → candidate is in the inter-period intermission → skip
+        #   faceoff / faceoff_cutscene first
+        #       → play resumed after a goal; prior sequence is closed → allow
+        #   banner_detected / inferred_goal first
+        #       → still inside that goal's replay tail → skip
+        #   no boundary found (start of file)
+        #       → very early in the recording; treat as normal play → allow
         in_prior_goal_sequence = False
+        in_intermission        = False
         for back_idx in range(i - 1, -1, -1):
             prev = results[back_idx]
+            if prev.get("game_start") or prev.get("period_start"):
+                # Puck has already dropped in the current period — normal play.
+                break
+            if prev.get("period_end"):
+                # Period ended before any puck-drop was seen scanning backwards
+                # → this candidate sits in the inter-period intermission.
+                in_intermission = True
+                break
             if prev.get("label") in {"faceoff_cutscene", "faceoff"}:
-                # A faceoff separates us from any earlier goal — play resumed.
+                # A faceoff separates the candidate from any earlier goal —
+                # play has resumed, prior goal sequence is closed.
                 break
             if prev.get("banner_detected") or prev.get("inferred_goal"):
+                # Candidate is still inside a prior confirmed goal's replay tail.
                 in_prior_goal_sequence = True
                 break
         if in_prior_goal_sequence:
             logger.info(
                 "  Skipping faceoff-pattern inference — replay tail of a prior goal: %s",
+                Path(seg["path"]).name,
+            )
+            continue
+        if in_intermission:
+            logger.info(
+                "  Skipping faceoff-pattern inference — inter-period intermission: %s",
                 Path(seg["path"]).name,
             )
             continue
@@ -480,10 +505,6 @@ def run_pipeline(
     if demoted:
         logger.info("  Demoted %d goal segment(s) without banner confirmation.", demoted)
 
-    # ── Step 4c.5: Infer goals from faceoff pattern (handles banner failures) ─
-    logger.info("\u2501\u2501\u2501  Step 4c.5: Faceoff-pattern goal inference  \u2501\u2501\u2501")
-    results = _infer_goals_from_faceoff_pattern(results)
-
     # ── Step 4d: Game clock detection (period / game end) ──────────────────
     # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
     # states. Segments covering the final ~60s before game end are tagged
@@ -622,6 +643,13 @@ def run_pipeline(
             _period = min(_period + 1, 3)
         elif _r.get("regulation_end"):
             _period = 4  # first segment after regulation buzzer is OT
+
+    # ── Step 4d.2: Infer goals from faceoff pattern ───────────────────────────
+    # Runs AFTER clock detection so that period_end / period_start / game_start
+    # flags are already set. The guard inside the function — which skips
+    # period-end buzzer segments — is only effective when those flags exist.
+    logger.info("\u2501\u2501\u2501  Step 4d.2: Faceoff-pattern goal inference  \u2501\u2501\u2501")
+    results = _infer_goals_from_faceoff_pattern(results)
 
     # ── Step 4d.5: VS screen → intro segment tagging ─────────────────────────
     # Clip starts 6 s after the VS screen first appears and runs through

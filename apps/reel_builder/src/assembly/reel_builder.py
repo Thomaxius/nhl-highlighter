@@ -199,7 +199,10 @@ def build_reel(
         for gi, grp in enumerate(selected_groups):
             injected.append(grp)
             if gi + 1 < len(selected_groups):
-                cur_period  = grp[-1].get("period_number", 1)
+                # Use the FIRST segment's period for both sides so that a goal
+                # group whose chained replays bleed into the next period still
+                # reads as belonging to the period the goal itself was scored in.
+                cur_period  = grp[0].get("period_number", 1)
                 next_period = selected_groups[gi + 1][0].get("period_number", 1)
                 if next_period > cur_period:
                     fname = _TRANSITION_MAP.get(next_period, "overtime_period_transition_animation.mp4")
@@ -260,6 +263,15 @@ def build_reel(
                         src = concat_intro
             elif lead.get("game_end") or lead.get("regulation_end"):
                 # ── Concatenate period-end segments (regulation or OT) and trim ──
+                # For regulation_end (not game_end), strip any segments that contain
+                # the pause menu — those are the inter-period intermission screens and
+                # should not appear in the reel. game_end is allowed to show a brief
+                # menu because the user explicitly requested it.
+                if lead.get("regulation_end") and not lead.get("game_end"):
+                    group = [s for s in group if not s.get("has_menu")]
+                    if not group:
+                        logger.warning("regulation_end group had only menu segments — skipping.")
+                        continue
                 if len(group) > 1:
                     raw_gameend = tmp / f"group_{group_idx:03d}_gameend_raw.mp4"
                     paths       = [Path(s["path"]).resolve() for s in group]

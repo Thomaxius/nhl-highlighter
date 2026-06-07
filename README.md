@@ -258,6 +258,14 @@ OpenCV template matching requires cropped reference images in `configs/`. Replac
 
 Multiple `goal_banner_template` files (numbered 1–N) handle different team banner colours.
 
+### TODO — Additional templates that would improve detection reliability
+
+| File | What to crop | Benefit |
+|---|---|---|
+| `period_start_clock_template_2nd.png` | Clock region showing exactly `20:00 2ND` | Rock-solid 2nd-period start detection; current OCR occasionally misreads "2ND" |
+| `period_start_clock_template_3rd.png` | Clock region showing exactly `20:00 3RD` | Same for 3rd period; OCR has misread this as "SRD" |
+| `intermission_screen_template.png` | Distinctive intermission stats/recap screen | Direct intermission signal; avoids relying on period_end→game_start inference to suppress false goal inference during intermissions |
+
 ---
 
 ## Tech Stack
