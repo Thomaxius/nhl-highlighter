@@ -157,6 +157,38 @@ def _chain_goal_sequences(
     return results
 
 
+def _drop_empty_inferred_goals(results: list[dict]) -> list[dict]:
+    """
+    Demote faceoff-inferred goals that chained no celebration / replay.
+
+    Banner-confirmed goals are trusted even when they appear solo, but an
+    *inferred* goal relies entirely on the surrounding post-goal sequence to be
+    real: every genuine goal is followed by a celebration and/or replay before
+    the next faceoff. When _chain_goal_sequences attaches zero follow-up
+    segments to an inferred goal, the inference was almost certainly a false
+    positive (e.g. a scoring chance / shot followed straight by a faceoff with
+    no goal celebration). Such goals would otherwise emit a bare, contextless
+    clip, so we demote them back to `other`.
+    """
+    chained_targets = {
+        r["chain_goal_idx"] for r in results if r.get("chain_goal_idx") is not None
+    }
+    dropped = 0
+    for idx, seg in enumerate(results):
+        if seg.get("inferred_goal") and not seg.get("banner_detected"):
+            if idx not in chained_targets:
+                seg["inferred_goal"] = False
+                seg["label"] = "other"
+                logger.info(
+                    "  Dropped empty inferred goal (no celebration/replay chained): %s",
+                    Path(seg["path"]).name,
+                )
+                dropped += 1
+    if dropped:
+        logger.info("  Dropped %d empty inferred goal(s).", dropped)
+    return results
+
+
 def _get_clip_duration(video_path) -> float:
     """Return the duration of a video clip in seconds."""
     import cv2
@@ -193,7 +225,7 @@ def _infer_goals_from_faceoff_pattern(
         if seg.get("banner_detected") or seg.get("inferred_goal"):
             continue
         # A period-end buzzer moment looks structurally identical to a post-goal
-        # sequence (replay → faceoff cutscene) — never promote it as a goal
+        # sequence (replay → efaceoff cutscene) — never promote it as a goal
         if seg.get("period_end") or seg.get("period_start") or seg.get("game_start"):
             continue
         # Candidate: ML thought this was a goal or scoring chance
@@ -204,6 +236,30 @@ def _infer_goals_from_faceoff_pattern(
             continue
         # Weak scoring-chance predictions are unlikely to be real goals
         if ml == "scoring_chance" and seg.get("confidence", 0.0) < MIN_SC_CONF:
+            continue
+
+        # Guard against promoting a replay frame from a PRIOR goal's sequence.
+        # A real goal's in-game replay frequently contains a clip the classifier
+        # labels `goal` (the puck visibly entering the net). If a confirmed goal
+        # occurred recently and no faceoff (cutscene or bare) has happened since,
+        # we are still inside that goal's post-goal sequence — play has not
+        # resumed, so this candidate cannot be a new goal. A genuine second goal
+        # is always preceded by a faceoff (the prior sequence ended, play
+        # resumed, then the puck went in again).
+        in_prior_goal_sequence = False
+        for back_idx in range(i - 1, -1, -1):
+            prev = results[back_idx]
+            if prev.get("label") in {"faceoff_cutscene", "faceoff"}:
+                # A faceoff separates us from any earlier goal — play resumed.
+                break
+            if prev.get("banner_detected") or prev.get("inferred_goal"):
+                in_prior_goal_sequence = True
+                break
+        if in_prior_goal_sequence:
+            logger.info(
+                "  Skipping faceoff-pattern inference — replay tail of a prior goal: %s",
+                Path(seg["path"]).name,
+            )
             continue
 
         # Walk forward using virtual steps: a consecutive run of goal_replay /
@@ -819,6 +875,10 @@ def run_pipeline(
     # ── Step 4f: Chain goal → celebration → replay ───────────────────────────
     logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
     results = _chain_goal_sequences(results)
+
+    # Demote inferred goals that ended up with no chained celebration/replay —
+    # they are almost always false positives and would emit a bare clip.
+    results = _drop_empty_inferred_goals(results)
 
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")
