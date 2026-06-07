@@ -244,26 +244,38 @@ def upload_highlight(video_file: Path, title: str) -> str | None:
 def process_video(video_id: str, title: str, state: dict):
     raw_video_dir = RAW_DIR / video_id
     output_file = EXPORTS_DIR / f"{video_id}_highlights.mp4"
+    processed_dir = APP_DIR / "apps" / "shared" / "data" / "processed"
 
     logger.info("=== Processing: %s  (%s) ===", title, video_id)
     state["processed"][video_id] = {"status": "downloading", "title": title}
     save_state(state)
 
     try:
-        existing = list(raw_video_dir.glob("*.mp4")) + list(raw_video_dir.glob("*.webm")) if raw_video_dir.exists() else []
-        if existing:
-            downloaded = existing[0]
-            logger.info("Raw file already present, skipping download: %s", downloaded.name)
+        # Check for an already-normalised file first — if present we can skip
+        # both the download and the FFmpeg re-encode entirely.
+        norm_candidates = list(processed_dir.glob(f"{video_id}*_norm.mp4")) if processed_dir.exists() else []
+        if norm_candidates:
+            pipeline_input = norm_candidates[0]
+            logger.info("Normalised file already present, skipping download + re-encode: %s", pipeline_input.name)
         else:
-            logger.info("Downloading...")
-            downloaded = download_video(video_id, raw_video_dir)
-            logger.info("Downloaded: %s", downloaded.name)
+            # Fall back to checking for the raw downloaded file.
+            existing_raw = (
+                list(raw_video_dir.glob("*.mp4")) + list(raw_video_dir.glob("*.webm"))
+                if raw_video_dir.exists() else []
+            )
+            if existing_raw:
+                pipeline_input = existing_raw[0]
+                logger.info("Raw file already present, skipping download: %s", pipeline_input.name)
+            else:
+                logger.info("Downloading...")
+                pipeline_input = download_video(video_id, raw_video_dir)
+                logger.info("Downloaded: %s", pipeline_input.name)
 
         state["processed"][video_id]["status"] = "processing"
         save_state(state)
 
         logger.info("Running pipeline (this may take a long time)...")
-        run_pipeline(downloaded, output_file)
+        run_pipeline(pipeline_input, output_file)
         logger.info("Pipeline finished: %s", output_file)
 
         state["processed"][video_id]["status"] = "uploading"
