@@ -171,6 +171,7 @@ def _infer_goals_from_faceoff_pattern(
     results: list[dict],
     max_lookahead: int = _CFG["goal_inference"]["max_lookahead"],
     min_sc_confidence: float = _CFG["goal_inference"]["min_sc_confidence"],
+    min_faceoff_confidence: float = _CFG["goal_inference"]["min_faceoff_confidence"],
 ) -> list[dict]:
     """
     Infer goals from the post-goal sequence when banner detection fails.
@@ -201,23 +202,39 @@ def _infer_goals_from_faceoff_pattern(
         if ml == "scoring_chance" and seg.get("confidence", 0.0) < MIN_SC_CONF:
             continue
 
-        for j in range(1, MAX_LOOKAHEAD + 1):
-            next_idx = i + j
-            if next_idx >= len(results):
-                break
-            nxt = results[next_idx]
+        # Walk forward using virtual steps: a consecutive run of goal_replay /
+        # other_replay segments counts as ONE virtual step regardless of how
+        # many individual short clips the scene-splitter produced.
+        virtual_step = 0
+        actual_idx = i + 1
+        in_replay_run = False
+        while virtual_step < MAX_LOOKAHEAD and actual_idx < len(results):
+            nxt = results[actual_idx]
+            actual_idx += 1
+
+            is_replay = nxt.get("label") in {"goal_replay", "other_replay"}
+            if is_replay:
+                if not in_replay_run:
+                    # First segment of a new replay run — costs one virtual step
+                    in_replay_run = True
+                    virtual_step += 1
+                # Subsequent segments in the same run are free
+            else:
+                in_replay_run = False
+                virtual_step += 1
 
             # faceoff_cutscene = normal post-goal sequence
             # faceoff directly = player skipped the cutscene
-            if nxt.get("label") in {"faceoff_cutscene", "faceoff"}:
+            if nxt.get("label") in {"faceoff_cutscene", "faceoff"} and nxt.get("confidence", 0.0) >= min_faceoff_confidence:
                 seg["label"] = "goal"
                 seg["inferred_goal"] = True
                 seg["confidence"] = max(seg.get("confidence", 0.0), 0.90)
                 seg["score"] = max(seg.get("score", seg["confidence"]), 0.90)
                 trigger = nxt.get("label")
                 logger.info(
-                    "  Faceoff-pattern goal inferred: %s  ml=%s conf=%.0f%%  (%s at +%d)",
-                    Path(seg["path"]).name, ml, seg["confidence"] * 100, trigger, j,
+                    "  Faceoff-pattern goal inferred: %s  ml=%s conf=%.0f%%  (%s at virtual +%d / actual +%d)",
+                    Path(seg["path"]).name, ml, seg["confidence"] * 100, trigger,
+                    virtual_step, actual_idx - i - 1,
                 )
                 promoted += 1
                 break
