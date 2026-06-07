@@ -555,6 +555,18 @@ def run_pipeline(
     else:
         logger.info("Skipping game clock detection (apps/reel_builder/configs/game_end_template.png not found)")
 
+    # ── Period numbering: tag every segment with the period it belongs to ─────
+    # period 1 = 1st, 2 = 2nd, 3 = 3rd, 4+ = OT periods.
+    # period_end segment is still part of the current period; the one after it
+    # is the first of the next period.
+    _period = 1
+    for _r in results:
+        _r["period_number"] = _period
+        if _r.get("period_end"):
+            _period = min(_period + 1, 3)
+        elif _r.get("regulation_end"):
+            _period = 4  # first segment after regulation buzzer is OT
+
     # ── Step 4d.5: VS screen → intro segment tagging ─────────────────────────
     # Clip starts 6 s after the VS screen first appears and runs through
     # game_start (20:00 clock) + 7 s of actual play.
@@ -822,6 +834,7 @@ def run_pipeline(
 
     # ── Step 6: Assemble reel ────────────────────────────────────────────────
     logger.info("━━━  Step 6: Building reel  ━━━")
+    _pt_dir = Path("apps/reel_builder/assets/period_transitions")
     build_reel(
         segments=results,
         output_path=output_path,
@@ -829,6 +842,7 @@ def run_pipeline(
         max_clips=max_clips,
         min_confidence=min_confidence,
         sc_min_confidence=sc_min_confidence,
+        period_transitions_dir=_pt_dir if _pt_dir.exists() else None,
     )
     logger.info("Done!  Reel → %s", output_path)
 

@@ -33,6 +33,11 @@ ENV/
 # ── Config templates (keep these tracked) ────────────────────────────────────
 !apps/reel_builder/configs/*.png
 
+# ── Period transition animation assets (keep these tracked) ──────────────────
+!apps/reel_builder/assets/period_transitions/2nd_period_transition_animation.mp4
+!apps/reel_builder/assets/period_transitions/3rd_period_transition_animation.mp4
+!apps/reel_builder/assets/period_transitions/overtime_period_transition_animation.mp4
+
 # ── OAuth credentials — never commit ─────────────────────────────────────────
 config/client_secrets.json
 configs/client_secrets.json

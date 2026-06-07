@@ -31,6 +31,7 @@ def build_reel(
     min_confidence: float = 0.55,
     sc_min_confidence: float = 0.45,
     add_overlays: bool = True,
+    period_transitions_dir: Optional[str | Path] = None,
 ) -> Path:
     """
     Assemble a highlight reel from classified segments.
@@ -181,6 +182,37 @@ def build_reel(
                        if id(g) in selected_highlights or g in structural_middle]
     selected_groups = head_groups + selected_middle + tail_groups
 
+    # ── Inject period-transition clips between groups that span a period boundary ──
+    # The transition asset to show is determined by the period the NEXT group belongs to:
+    #   period 2 → 2nd_period_transition_animation.mp4
+    #   period 3 → 3rd_period_transition_animation.mp4
+    #   period 4+ → overtime_period_transition_animation.mp4
+    # A synthetic group containing a single sentinel dict with "period_transition"
+    # is inserted; the processing loop below handles it as a plain passthrough clip.
+    _TRANSITION_MAP = {
+        2: "2nd_period_transition_animation.mp4",
+        3: "3rd_period_transition_animation.mp4",
+    }
+    if period_transitions_dir is not None:
+        pt_dir = Path(period_transitions_dir)
+        injected: list[list[dict]] = []
+        for gi, grp in enumerate(selected_groups):
+            injected.append(grp)
+            if gi + 1 < len(selected_groups):
+                cur_period  = grp[-1].get("period_number", 1)
+                next_period = selected_groups[gi + 1][0].get("period_number", 1)
+                if next_period > cur_period:
+                    fname = _TRANSITION_MAP.get(next_period, "overtime_period_transition_animation.mp4")
+                    tpath = pt_dir / fname
+                    if tpath.exists():
+                        injected.append([{"period_transition": True, "path": str(tpath),
+                                          "label": "period_transition", "confidence": 1.0,
+                                          "to_period": next_period}])
+                        logger.info("  Injecting period transition → period %d: %s", next_period, fname)
+                    else:
+                        logger.warning("  Period transition asset not found: %s", tpath)
+        selected_groups = injected
+
     logger.info(
         "Building reel from %d groups (%d intro + %d structural + %d goals + %d other highlights + %d game_end) …",
         len(selected_groups), len(head_groups), len(structural_middle),
@@ -260,9 +292,11 @@ def build_reel(
                     src = trimmed_ge if trimmed_ge.exists() else base
                 else:
                     src = base
+            elif lead.get("period_transition"):
+                # ── Period-transition animation — use as-is (already normalized) ──
+                src = Path(lead["path"])
             elif lead.get("label") == "scoring_chance" and len(group) > 1:
                 # ── Scoring chance with chained replay: trim lead then concat ──
-                lead_src = Path(lead["path"])
                 if "trim_start_s" in lead and "trim_end_s" in lead:
                     trimmed_lead = tmp / f"group_{group_idx:03d}_sc_lead.mp4"
                     _ffmpeg_trim(lead_src, trimmed_lead, lead["trim_start_s"], lead["trim_end_s"])
@@ -294,7 +328,7 @@ def build_reel(
                         src = merged_b
 
             dst = tmp / f"clip_{group_idx:03d}.mp4"
-            if add_overlays:
+            if add_overlays and not lead.get("period_transition"):
                 _burn_overlay(src, dst, label=lead["label"], confidence=lead["confidence"])
             else:
                 import shutil as _shutil
