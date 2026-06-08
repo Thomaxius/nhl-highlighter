@@ -32,6 +32,7 @@ def build_reel(
     sc_min_confidence: float = 0.45,
     add_overlays: bool = True,
     period_transitions_dir: Optional[str | Path] = None,
+    confirmed_period_boundaries: Optional[set] = None,
 ) -> Path:
     """
     Assemble a highlight reel from classified segments.
@@ -205,6 +206,17 @@ def build_reel(
                 cur_period  = grp[0].get("period_number", 1)
                 next_period = selected_groups[gi + 1][0].get("period_number", 1)
                 if next_period > cur_period:
+                    # Only inject if the clock detector confirmed this boundary.
+                    # If confirmed_period_boundaries is None (not provided), allow
+                    # all transitions for backward compatibility.
+                    if (confirmed_period_boundaries is not None
+                            and next_period not in confirmed_period_boundaries):
+                        logger.info(
+                            "  Skipping period transition → period %d "
+                            "(boundary not confirmed by clock detector)",
+                            next_period,
+                        )
+                        continue
                     fname = _TRANSITION_MAP.get(next_period, "overtime_period_transition_animation.mp4")
                     tpath = pt_dir / fname
                     if tpath.exists():

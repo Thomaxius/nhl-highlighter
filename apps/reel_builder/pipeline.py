@@ -512,7 +512,16 @@ def run_pipeline(
     clock_template = Path("apps/reel_builder/configs/game_end_template.png")
     if clock_template.exists():
         logger.info("━━━  Step 4d: Game clock detection  ━━━")
-        clock_detector = GameClockDetector(template_path=clock_template)
+        _gc_cfg = _CFG.get("game_clock", {})
+        clock_detector = GameClockDetector(
+            template_path=clock_template,
+            min_game_end_conf=_gc_cfg.get("min_game_end_conf", 0.85),
+            min_period_end_conf=_gc_cfg.get("min_period_end_conf", 0.85),
+            min_period_start_conf=_gc_cfg.get("min_period_start_conf", 0.85),
+            period_end_confirm_window_s=_gc_cfg.get("period_end_confirm_window_s", 10.0),
+            period_end_confirm_min_hits=int(_gc_cfg.get("period_end_confirm_min_hits", 2)),
+            period_end_confirm_interval_s=_gc_cfg.get("period_end_confirm_interval_s", 1.0),
+        )
         FINAL_SECONDS_WINDOW = 5.0   # include up to this many seconds before 0:00
         POST_GAME_END_S    = 20.0  # include this many seconds after 0:00 is detected
 
@@ -634,10 +643,21 @@ def run_pipeline(
 
     # ── Period numbering: tag every segment with the period it belongs to ─────
     # period 1 = 1st, 2 = 2nd, 3 = 3rd, 4+ = OT periods.
-    # period_end segment is still part of the current period; the one after it
-    # is the first of the next period.
+    #
+    # Two independent signals can advance the period counter:
+    #   period_end   — the buzzer fired at the END of a period.  The segment
+    #                  itself is still in the current period; everything after
+    #                  it moves to the next.
+    #   period_start — the clock read 20:00 for a NEW period (puck drop).  The
+    #                  segment with this flag IS the first of the new period, so
+    #                  we advance BEFORE assigning period_number to it.  This
+    #                  keeps things correct even when a period_end was missed or
+    #                  suppressed as a false positive.
     _period = 1
     for _r in results:
+        # Advance BEFORE numbering when we hit a puck-drop start signal.
+        if _r.get("period_start") and _period < 3:
+            _period = min(_period + 1, 3)
         _r["period_number"] = _period
         if _r.get("period_end"):
             _period = min(_period + 1, 3)
@@ -923,6 +943,22 @@ def run_pipeline(
     # ── Step 6: Assemble reel ────────────────────────────────────────────────
     logger.info("━━━  Step 6: Building reel  ━━━")
     _pt_dir = Path("apps/reel_builder/assets/period_transitions")
+
+    # Build the set of period numbers whose boundaries were confirmed by the
+    # clock detector.  Only transitions to confirmed periods are injected.
+    confirmed_period_boundaries: set[int] = set()
+    for _r in results:
+        if _r.get("period_end"):
+            confirmed_period_boundaries.add(_r.get("period_number", 1) + 1)
+        if _r.get("period_start") or _r.get("game_start"):
+            confirmed_period_boundaries.add(_r.get("period_number", 1))
+        if _r.get("regulation_end"):
+            confirmed_period_boundaries.add(4)
+    if confirmed_period_boundaries:
+        logger.info("  Confirmed period boundaries: %s", sorted(confirmed_period_boundaries))
+    else:
+        logger.info("  No confirmed period boundaries — period transitions will be skipped.")
+
     build_reel(
         segments=results,
         output_path=output_path,
@@ -931,6 +967,7 @@ def run_pipeline(
         min_confidence=min_confidence,
         sc_min_confidence=sc_min_confidence,
         period_transitions_dir=_pt_dir if _pt_dir.exists() else None,
+        confirmed_period_boundaries=confirmed_period_boundaries,
     )
     logger.info("Done!  Reel → %s", output_path)
 

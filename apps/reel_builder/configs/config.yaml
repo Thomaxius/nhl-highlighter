@@ -51,6 +51,16 @@ model:
     - faceoff
     - other
 
+# ── Game clock detection ──────────────────────────────────────────────────────
+game_clock:
+  min_template_conf: 0.45      # OCR gate (all events); loose — just filters black screens
+  min_game_end_conf: 0.85      # confidence gate for game_end / regulation_end (reverse scan)
+  min_period_end_conf: 0.85    # confidence gate for period_end events (forward scan)
+  min_period_start_conf: 0.85  # confidence gate for period-start template matches
+  period_end_confirm_window_s: 10.0   # ±Xs dense rescan around each period_end candidate
+  period_end_confirm_min_hits: 2      # period_end accepted only if ≥N frames confirm it
+  period_end_confirm_interval_s: 1.0  # rescan interval (seconds) inside confirmation window
+
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
   data_dir: "data/labeled"

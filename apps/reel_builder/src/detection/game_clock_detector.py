@@ -45,6 +45,13 @@ ROI_H = 0.074  # height     (fraction of frame height) — tall enough for clock
 # Template match threshold below which we skip OCR entirely (speed gate).
 MIN_TEMPLATE_CONF        = 0.45  # gate to allow OCR (applies to all events)
 MIN_GAME_END_CONF        = 0.70  # stricter gate specifically for game_end events
+MIN_PERIOD_END_CONF      = 0.65  # stricter gate for period_end — reduces false positives
+                                 # from scoreboard overlays that look vaguely like 0:01.
+                                 # Real period-end detections in tested games: 0.71–0.88.
+                                 # False positives in tested games: 0.50–0.60.
+MIN_PERIOD_START_CONF    = 0.75  # minimum template-match confidence to fire a period_start
+                                 # event from the clock-only 20:00 templates.  These are
+                                 # tight crops so genuine matches are typically 0.80+.
 
 
 class GameClockDetector:
@@ -66,9 +73,21 @@ class GameClockDetector:
         ot_template_path: str | Path = "apps/reel_builder/configs/game_clock_ot.png",
         template_threshold: float = MIN_TEMPLATE_CONF,
         scale_factors: list[float] | None = None,
+        min_game_end_conf: float = MIN_GAME_END_CONF,
+        min_period_end_conf: float = MIN_PERIOD_END_CONF,
+        min_period_start_conf: float = MIN_PERIOD_START_CONF,
+        period_end_confirm_window_s: float = 10.0,
+        period_end_confirm_min_hits: int = 2,
+        period_end_confirm_interval_s: float = 1.0,
     ) -> None:
         self.template_threshold = template_threshold
         self.scale_factors = scale_factors or [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        self.min_game_end_conf = min_game_end_conf
+        self.min_period_end_conf = min_period_end_conf
+        self.min_period_start_conf = min_period_start_conf
+        self.period_end_confirm_window_s = period_end_confirm_window_s
+        self.period_end_confirm_min_hits = period_end_confirm_min_hits
+        self.period_end_confirm_interval_s = period_end_confirm_interval_s
 
         template_path = Path(template_path)
         if not template_path.exists():
@@ -94,6 +113,32 @@ class GameClockDetector:
             self.template_gray.shape[1], self.template_gray.shape[0],
             template_threshold,
         )
+
+        # ── Period-start templates (20:00 clock crops per period) ─────────
+        # Auto-discover  {1,2,3}*_period_clock_only_20_00.png  in the same
+        # configs dir as the main template.  Keyed by (period_number, event):
+        #   period 1 → game_start
+        #   period 2/3 → period_start
+        # The clock-only crops cover only the rightmost ~9% of the frame,
+        # so they need their own full-top-strip search region (see
+        # _match_period_start_template).
+        _PERIOD_TEMPLATE_MAP = {
+            "1st": (1, "game_start"),
+            "2nd": (2, "period_start"),
+            "3rd": (3, "period_start"),
+        }
+        configs_dir = Path(template_path).parent
+        self._period_start_templates: list[tuple[int, str, np.ndarray]] = []  # (period, event, gray)
+        for prefix, (period_num, ev_type) in _PERIOD_TEMPLATE_MAP.items():
+            fname = configs_dir / f"{prefix}_period_clock_only_20_00.png"
+            if fname.exists():
+                t = cv2.imread(str(fname), cv2.IMREAD_GRAYSCALE)
+                if t is not None:
+                    self._period_start_templates.append((period_num, ev_type, t))
+                    logger.info(
+                        "Period-start template loaded: %s  (%dx%d, event=%s)",
+                        fname.name, t.shape[1], t.shape[0], ev_type,
+                    )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -168,7 +213,7 @@ class GameClockDetector:
                 continue
 
             gate_conf = self._template_conf(frame)
-            if gate_conf < MIN_GAME_END_CONF:
+            if gate_conf < self.min_game_end_conf:
                 continue
 
             clock_str = self._ocr_clock(frame)
@@ -176,8 +221,8 @@ class GameClockDetector:
             if event in _TERMINAL:
                 t = i / fps
                 logger.info(
-                    "  Clock event (reverse scan): t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
-                    t, clock_str, event, gate_conf,
+                    "  Clock event (reverse scan): %s (%.1fs)  OCR=%r  event=%s  gate_conf=%.2f",
+                    self._fmt_t(t), t, clock_str, event, gate_conf,
                 )
                 raw_events.append({"time_s": t, "event": event})
                 break  # earliest confirmed hit from the end — done
@@ -196,13 +241,41 @@ class GameClockDetector:
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
             if event and event not in _TERMINAL:
+                # Apply a stricter confidence gate for period_end to suppress
+                # false positives from scoreboard/overlay noise mid-period.
+                if event == "period_end" and gate_conf < self.min_period_end_conf:
+                    logger.info(
+                        "  Skipping low-conf period_end (gate_conf=%.2f < %.2f): %s (%.1fs)  OCR=%r",
+                        gate_conf, self.min_period_end_conf, self._fmt_t(i / fps), i / fps, clock_str,
+                    )
+                    continue
                 t = i / fps
+                # For period_end, additionally require a dense rescan of ±window
+                # seconds to confirm the clock is genuinely near zero — not a
+                # one-off OCR coincidence on a scoreboard overlay.
+                if event == "period_end" and not self._confirm_period_end(cap, fps, t):
+                    continue
                 logger.info(
-                    "  Clock event: t=%.1fs  OCR=%r  event=%s  gate_conf=%.2f",
-                    t, clock_str, event, gate_conf,
+                    "  Clock event: %s (%.1fs)  OCR=%r  event=%s  gate_conf=%.2f",
+                    self._fmt_t(t), t, clock_str, event, gate_conf,
                 )
                 raw_events.append({"time_s": t, "event": event})
 
+            # ── Period-start template matching (independent of OCR gate) ────
+            # The 20:00 clock crops have a very different appearance from the
+            # near-zero end-of-game template, so the OCR gate above rarely
+            # fires on them.  Check each period-start template directly.
+            if self._period_start_templates:
+                for period_num, ev_type, pt in self._period_start_templates:
+                    conf = self._match_period_start_template(frame, pt)
+                    if conf >= self.min_period_start_conf:
+                        t = i / fps
+                        logger.info(
+                            "  Period-start template match: period=%d  event=%s  conf=%.2f  %s (%.1fs)",
+                            period_num, ev_type, conf, self._fmt_t(t), t,
+                        )
+                        raw_events.append({"time_s": t, "event": ev_type})
+                        break  # only fire the highest-confidence match per frame
         cap.release()
 
         # Merge consecutive detections of the same event type
@@ -214,6 +287,59 @@ class GameClockDetector:
             [(f"{e['event']}@{e['time_s']:.0f}s") for e in merged],
         )
         return merged
+
+    def _confirm_period_end(
+        self,
+        cap: cv2.VideoCapture,
+        fps: float,
+        candidate_s: float,
+    ) -> bool:
+        """
+        Dense rescan of ±period_end_confirm_window_s around *candidate_s*.
+
+        Returns True only if ≥ period_end_confirm_min_hits frames within that
+        window independently confirm a near-zero clock with gate_conf ≥
+        min_period_end_conf.  A genuine period end will produce many such
+        frames; a one-off OCR coincidence almost never repeats within 10s.
+        """
+        window   = self.period_end_confirm_window_s
+        min_hits = self.period_end_confirm_min_hits
+        interval = self.period_end_confirm_interval_s
+        t0   = max(0.0, candidate_s - window)
+        t1   = candidate_s + window
+        step = max(1, int(fps * interval))
+        hits = 0
+        for fi in range(int(t0 * fps), int(t1 * fps) + 1, step):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            gate_conf = self._template_conf(frame)
+            if gate_conf < self.min_period_end_conf:
+                continue
+            clock_str = self._ocr_clock(frame)
+            event     = self._classify_clock(clock_str)
+            if event == "period_end":
+                hits += 1
+                if hits >= min_hits:
+                    logger.info(
+                        "  period_end confirmed: %d hits in [%s, %s]",
+                        hits, self._fmt_t(t0), self._fmt_t(t1),
+                    )
+                    return True
+        logger.info(
+            "  period_end NOT confirmed: %d/%d hits in [%s, %s] "
+            "\u2014 dropping candidate at %s",
+            hits, min_hits, self._fmt_t(t0), self._fmt_t(t1), self._fmt_t(candidate_s),
+        )
+        return False
+
+    @staticmethod
+    def _fmt_t(t_s: float) -> str:
+        """Format a timestamp in seconds as MM:SS for log readability."""
+        m = int(t_s) // 60
+        s = int(t_s) % 60
+        return f"{m:02d}:{s:02d}"
 
     def detect_in_segment(self, video_path: str | Path, sample_frames: int = 10) -> dict:
         """
@@ -268,6 +394,30 @@ class GameClockDetector:
         region = frame[y0:y1, x0:x1]
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
         return gray, x0, y0
+
+    def _match_period_start_template(self, frame: np.ndarray, template_gray: np.ndarray) -> float:
+        """
+        Match a clock-only period-start template against the top-left HUD region
+        (same 30% × 15% as the OCR gate) and return the best confidence score.
+        """
+        h, w = frame.shape[:2]
+        # Match the OCR gate region: top-left 30% × 15%.
+        strip = frame[0: int(h * 0.15), 0: int(w * 0.30)]
+        gray  = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+
+        best_conf = 0.0
+        for scale in self.scale_factors:
+            th, tw = template_gray.shape[:2]
+            new_h = max(1, int(th * scale))
+            new_w = max(1, int(tw * scale))
+            if new_h > gray.shape[0] or new_w > gray.shape[1]:
+                continue
+            resized = cv2.resize(template_gray, (new_w, new_h))
+            res = cv2.matchTemplate(gray, resized, cv2.TM_CCOEFF_NORMED)
+            _, v, _, _ = cv2.minMaxLoc(res)
+            if v > best_conf:
+                best_conf = v
+        return best_conf
 
     def _template_match(self, frame: np.ndarray, template: np.ndarray | None = None) -> tuple[float, int, int, int, int]:
         """
