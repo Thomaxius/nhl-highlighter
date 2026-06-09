@@ -34,6 +34,7 @@ from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
 from src.detection.pause_menu_detector import PauseMenuDetector
 from src.detection.stats_detector import detect_stats_screens, save_stats_csv, format_description
+from src.detection.star_detector import detect_star_screens, StarScreen as StarScreenResult
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -972,8 +973,8 @@ def run_pipeline(
     )
     logger.info("Done!  Reel → %s", output_path)
 
-    # ── Step 7: Stats screen detection ──────────────────────────────────────
-    # Scan each normalised clip for end-of-game stats screens.
+    # ── Step 7: Stats + Star screen detection ───────────────────────────────
+    # Scan each normalised clip for end-of-game stats screens and Three Stars.
     # Results are written as CSVs in a per-reel subfolder, the parsed tables
     # are logged in full, and a YouTube description file is saved alongside
     # the reel so the uploader can attach the stats to the video description.
@@ -1006,10 +1007,27 @@ def run_pipeline(
     if not all_stats:
         logger.info("  No stats screens found.")
 
+    logger.info("━━━  Step 7b: Star screen detection  ━━━")
+    all_stars: list = []
+    for clip in normalised:
+        stars = detect_star_screens(clip)
+        if stars:
+            all_stars.extend(stars)
+            for star in stars:
+                logger.info(
+                    "  %s STAR: %s  |  Stats: %s  |  t=%.1fs",
+                    star.rank,
+                    star.player_name or "(unknown)",
+                    star.player_stats or "(none)",
+                    star.timestamp_s,
+                )
+        else:
+            logger.info("  No star screens found in %s", clip.name)
+
     # Save the YouTube description (title substituted by the uploader)
     description_path = output_path.with_suffix(".txt")
     try:
-        desc = format_description(title="__TITLE__", screens=all_stats)
+        desc = format_description(title="__TITLE__", screens=all_stats, stars=all_stars or None)
         description_path.write_text(desc, encoding="utf-8")
         logger.info("  Description template → %s", description_path)
     except Exception as _exc:

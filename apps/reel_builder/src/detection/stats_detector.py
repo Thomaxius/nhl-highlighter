@@ -648,12 +648,18 @@ def format_description(
     title: str,
     screens: list[StatsScreen],
     disclaimer: str = DEFAULT_DISCLAIMER,
+    stars: list | None = None,
 ) -> str:
-    """Build a YouTube video description with game stats tables.
+    """Build a YouTube video description with game stats tables and stars.
 
     Format::
 
         {title}
+
+        ⭐ Stars of the Game:
+        🥇 FIRST STAR: Player Name
+        🥈 SECOND STAR: Player Name
+        🥉 THIRD STAR: Player Name
 
         Stats:
         {team1} Skaters:
@@ -669,6 +675,25 @@ def format_description(
     Teams appear in the order they were detected.  Only the most meaningful
     columns are shown to stay within YouTube's 5 000-character limit.
     """
+    _RANK_STARS = {"FIRST": "⭐⭐⭐", "SECOND": "⭐⭐", "THIRD": "⭐"}
+
+    parts: list[str] = [title]
+
+    # Stars of the game — right under the title
+    if stars:
+        rank_order = ["FIRST", "SECOND", "THIRD"]
+        by_rank = {s.rank: s for s in stars}
+        stars_lines: list[str] = []
+        for rank in rank_order:
+            star = by_rank.get(rank)
+            if star is None:
+                continue
+            emoji = _RANK_STARS.get(rank, "⭐")
+            name_part = star.player_name or "(unknown)"
+            stars_lines.append(f"{emoji} {name_part}")
+        if stars_lines:
+            parts += [""] + stars_lines
+
     # Group screens by team (preserving detection order)
     teams_seen: list[str] = []
     by_team: dict[str, dict[str, StatsScreen]] = {}
@@ -678,7 +703,8 @@ def format_description(
             by_team[s.team] = {}
         by_team[s.team][s.tab] = s
 
-    parts: list[str] = [title, "", "Stats:"]
+    if teams_seen:
+        parts += ["", "Stats:"]
 
     for team in teams_seen:
         tabs = by_team[team]
@@ -696,7 +722,7 @@ def format_description(
                 if any(v and v != "-" for v in r.values())
             ]
             parts.append(f"\n{team} {label}:")
-            parts.append(_format_table_text(real_rows, col_names))
+            parts.append("```\n" + _format_table_text(real_rows, col_names) + "\n```")
 
     parts += ["", disclaimer]
     return "\n".join(parts)
