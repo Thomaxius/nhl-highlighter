@@ -196,21 +196,36 @@ class BannerDetector:
             video_path.name, n_samples, interval_s,
         )
 
-        raw_times: list[float] = []
+        # Read all sampled frames sequentially (VideoCapture is not thread-safe),
+        # then run template matching in parallel (OpenCV/numpy releases the GIL).
+        frame_list: list[tuple[int, np.ndarray]] = []
         for i in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
-            if not ret:
-                continue
-            conf = self._match_template_in_frame(frame, scale_factors=_fast_scales)
-            if conf >= self.threshold:
-                t = i / fps
-                raw_times.append(t)
-                logger.info(
-                    "  Raw-scan banner hit: t=%.2fs  frame=%d  conf=%.3f",
-                    t, i, conf,
-                )
+            if ret:
+                frame_list.append((i, frame))
         cap.release()
+
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = min(4, max(1, os.cpu_count() or 2))
+
+        def _match(item: tuple[int, np.ndarray]) -> tuple[int, float]:
+            idx, frm = item
+            return idx, self._match_template_in_frame(frm, scale_factors=_fast_scales)
+
+        raw_times: list[float] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for idx, conf in pool.map(_match, frame_list):
+                if conf >= self.threshold:
+                    t = idx / fps
+                    raw_times.append(t)
+                    logger.info(
+                        "  Raw-scan banner hit: t=%.2fs  frame=%d  conf=%.3f",
+                        t, idx, conf,
+                    )
+        raw_times.sort()
 
         # Merge consecutive hits within merge_gap_s into a single event
         merged: list[float] = []

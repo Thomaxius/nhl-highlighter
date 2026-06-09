@@ -385,17 +385,61 @@ def run_pipeline(
     classifier = HighlightClassifier(checkpoint_path=checkpoint)
     results = classifier.classify_segments(all_segments)
 
-    # ── Step 4b: Banner detection via raw-video scan ────────────────────────
-    # Scan the full normalised video at 1s intervals rather than per-split-
-    # segment.  Per-segment detection misses goals whose banner appears right
-    # at a scene cut (empirically conf ≈ 0.44 on segments vs 0.97 on the raw
-    # source).  After finding banner timestamps we map them back to the
-    # correct segment using a cumulative timeline.
+    # ── Steps 4b + 4d + 4d.5: Raw-video scans (parallel) ─────────────────────
+    # All three steps scan the same normalised video for independent signals.
+    # Initialise all detectors once and fire their scan_video / find_matches
+    # calls concurrently so total wall time equals the slowest scan rather
+    # than the sum of all three.
     import cv2 as _cv2
-    templates = sorted(Path("apps/reel_builder/configs").glob("goal_banner_template*.png"))
+    from concurrent.futures import ThreadPoolExecutor as _ScanPool
+
+    _bsc_templates  = sorted(Path("apps/reel_builder/configs").glob("goal_banner_template*.png"))
+    _bsc_clock_path = Path("apps/reel_builder/configs/game_end_template.png")
+    _bsc_vs_path    = Path("apps/reel_builder/configs/vs_screen_template3.png")
+    _bsc_gc_cfg     = _CFG.get("game_clock", {})
+
+    _bsc_banner = BannerDetector() if _bsc_templates else None
+    _bsc_clock  = GameClockDetector(
+        template_path=_bsc_clock_path,
+        min_game_end_conf=_bsc_gc_cfg.get("min_game_end_conf", 0.85),
+        min_period_end_conf=_bsc_gc_cfg.get("min_period_end_conf", 0.85),
+        min_period_start_conf=_bsc_gc_cfg.get("min_period_start_conf", 0.85),
+        period_end_confirm_window_s=_bsc_gc_cfg.get("period_end_confirm_window_s", 10.0),
+        period_end_confirm_min_hits=int(_bsc_gc_cfg.get("period_end_confirm_min_hits", 2)),
+        period_end_confirm_interval_s=_bsc_gc_cfg.get("period_end_confirm_interval_s", 1.0),
+    ) if _bsc_clock_path.exists() else None
+    _bsc_vs = VsScreenDetector(template_path=_bsc_vs_path) if _bsc_vs_path.exists() else None
+
+    _raw_scan: dict[str, dict] = {}  # clip_stem → {banner_times, clock_events, vs_hits}
+    for _bsc_clip in normalised:
+        _bsc_stem = _bsc_clip.stem
+        if not any(_bsc_stem in str(r["path"]) for r in results):
+            continue
+        _bsc_cap = _cv2.VideoCapture(str(_bsc_clip))
+        _bsc_dur = _bsc_cap.get(_cv2.CAP_PROP_FRAME_COUNT) / (_bsc_cap.get(_cv2.CAP_PROP_FPS) or 30.0)
+        _bsc_cap.release()
+        logger.info(
+            "━━━  Parallel scan: %s  (banner=%s  clock=%s  vs=%s)  ━━━",
+            _bsc_clip.name, bool(_bsc_banner), bool(_bsc_clock), bool(_bsc_vs),
+        )
+        with _ScanPool(max_workers=3) as _bsc_pool:
+            _bsc_bf = _bsc_pool.submit(_bsc_banner.scan_video, _bsc_clip, 1.0) if _bsc_banner else None
+            _bsc_cf = _bsc_pool.submit(_bsc_clock.scan_video,  _bsc_clip)      if _bsc_clock  else None
+            # VS screen only appears in the first few minutes of a recording;
+            # cap the search at 300 s to avoid scanning the full game-length video.
+            _bsc_vf = _bsc_pool.submit(
+                _bsc_vs.find_matches, _bsc_clip, 0.5, min(300.0, _bsc_dur), 0.0,
+            ) if _bsc_vs else None
+        _raw_scan[_bsc_stem] = {
+            "banner_times": _bsc_bf.result() if _bsc_bf is not None else [],
+            "clock_events": _bsc_cf.result() if _bsc_cf is not None else [],
+            "vs_hits":      _bsc_vf.result() if _bsc_vf is not None else [],
+        }
+
+    # ── Step 4b: Apply banner-detection results ──────────────────────────────
+    templates = _bsc_templates  # alias used by the guard below
     if templates:
         logger.info("━━━  Step 4b: Banner detection (%d template(s))  ━━━", len(templates))
-        detector = BannerDetector()  # auto-loads all matching templates
         PRE_GOAL_S  = 7.0
         POST_GOAL_S = 3.0
 
@@ -421,8 +465,8 @@ def run_pipeline(
                 seg_ranges.append((cum_t, cum_t + dur, seg, _fps))
                 cum_t += dur
 
-            # Scan the uncut normalised source — no scene-boundary artifacts
-            banner_times = detector.scan_video(norm_clip, interval_s=1.0)
+            # Use pre-computed results from the parallel scan phase above.
+            banner_times = _raw_scan.get(norm_clip.stem, {}).get("banner_times", [])
 
             for bt in banner_times:
                 for seg_i, (start_s, end_s, seg, seg_fps) in enumerate(seg_ranges):
@@ -511,19 +555,8 @@ def run_pipeline(
     # Scans the raw video for 0:00 (game end) and 0:01 (period end) clock
     # states. Segments covering the final ~60s before game end are tagged
     # game_end=True so the reel builder always appends them.
-    clock_template = Path("apps/reel_builder/configs/game_end_template.png")
-    if clock_template.exists():
+    if _bsc_clock is not None:
         logger.info("━━━  Step 4d: Game clock detection  ━━━")
-        _gc_cfg = _CFG.get("game_clock", {})
-        clock_detector = GameClockDetector(
-            template_path=clock_template,
-            min_game_end_conf=_gc_cfg.get("min_game_end_conf", 0.85),
-            min_period_end_conf=_gc_cfg.get("min_period_end_conf", 0.85),
-            min_period_start_conf=_gc_cfg.get("min_period_start_conf", 0.85),
-            period_end_confirm_window_s=_gc_cfg.get("period_end_confirm_window_s", 10.0),
-            period_end_confirm_min_hits=int(_gc_cfg.get("period_end_confirm_min_hits", 2)),
-            period_end_confirm_interval_s=_gc_cfg.get("period_end_confirm_interval_s", 1.0),
-        )
         FINAL_SECONDS_WINDOW = 5.0   # include up to this many seconds before 0:00
         POST_GAME_END_S    = 20.0  # include this many seconds after 0:00 is detected
 
@@ -549,7 +582,7 @@ def run_pipeline(
                 seg_times.append((cum_t, cum_t + dur, seg))
                 cum_t += dur
 
-            clock_events = clock_detector.scan_video(norm_clip)
+            clock_events = _raw_scan.get(norm_clip.stem, {}).get("clock_events", [])
 
             # If multiple game_end/regulation_end events were detected, only keep
             # the last one so trim offsets are from the true final buzzer.
@@ -679,15 +712,13 @@ def run_pipeline(
     # Tagged segments carry trim offsets so the reel builder can cut precisely:
     #   intro_clip_start_s — seconds from the first tagged segment's start
     #   intro_clip_end_s   — seconds from the first tagged segment's start
-    vs_template = Path("apps/reel_builder/configs/vs_screen_template3.png")
     PRE_VS_SKIP_S  = 6.0   # skip this many seconds after VS screen first appears
     POST_FACEOFF_S = 7.0   # seconds of actual play to include after 20:00
     FALLBACK_INTRO_S = 30.0  # fallback intro length when no VS screen is found
     FALLBACK_INTRO_MAX_START_S = 20.0  # only treat an early 'other' as a cold-open intro if it begins this soon
     MIN_FALLBACK_INTRO_S = 4.0  # skip a fabricated intro shorter than this (after goal-overlap clamp)
-    if vs_template.exists():
+    if _bsc_vs is not None:
         logger.info("━━━  Step 4d.5: VS screen / intro detection  ━━━")
-        vs_detector = VsScreenDetector(template_path=vs_template)
         fallback_pause_template = Path("apps/reel_builder/configs/pause_menu_template.png")
         fallback_pause_detector = (
             PauseMenuDetector(template_path=fallback_pause_template)
@@ -727,30 +758,19 @@ def run_pipeline(
             # Use game_start as the upper bound for the VS screen search, with a
             # generous buffer. Fall back to the full video if clock detection
             # didn't find game_start (e.g. recording starts mid-game).
+            # vs_search_window kept for informational log messages below; the actual
+            # scan was pre-computed in the parallel phase above (capped at 300 s).
             if game_start_t is not None:
                 vs_search_window = game_start_t + 120.0
                 logger.info(
-                    "  VS search window: 0 – %.1fs (game_start=%.1fs + 120s buffer)",
+                    "  VS screen scanned up to min(300s, %.1fs) (game_start=%.1fs + 120s buffer)",
                     vs_search_window, game_start_t,
                 )
             else:
-                import cv2 as _cv2_vs
-                _cap_vs = _cv2_vs.VideoCapture(str(norm_clip))
-                _fps_vs = _cap_vs.get(_cv2_vs.CAP_PROP_FPS) or 30.0
-                _n_vs   = _cap_vs.get(_cv2_vs.CAP_PROP_FRAME_COUNT)
-                _cap_vs.release()
-                vs_search_window = _n_vs / _fps_vs
-                logger.info(
-                    "  VS search window: full video (%.1fs) — no game_start detected",
-                    vs_search_window,
-                )
+                vs_search_window = 300.0
+                logger.info("  VS screen scanned up to 300s (no game_start detected)")
 
-            vs_hits = vs_detector.find_matches(
-                norm_clip,
-                interval_s=0.5,
-                search_window_s=vs_search_window,
-                search_start_s=0.0,
-            )
+            vs_hits = _raw_scan.get(norm_clip.stem, {}).get("vs_hits", [])
             if not vs_hits:
                 fallback_seg = None
                 for (start_s, end_s, seg) in seg_times2:

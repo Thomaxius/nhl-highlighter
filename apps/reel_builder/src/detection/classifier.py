@@ -168,12 +168,28 @@ class HighlightClassifier:
         return winner
 
     def classify_segments(self, video_paths: list[Path]) -> list[dict]:
-        """Classify a list of segment paths and return results."""
-        results = []
-        for path in video_paths:
+        """Classify a list of segment paths and return results in original order.
+
+        Uses a ThreadPoolExecutor so frame decoding (OpenCV, GIL-released) and
+        PyTorch CPU inference (also GIL-released) overlap across clips.
+        Workers are capped at 3 to avoid CPU oversubscription on inference.
+        """
+        import os
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        workers = min(3, max(1, (os.cpu_count() or 2) // 2))
+
+        def _run(path):
             logger.info("Classifying: %s", Path(path).name)
-            results.append(self.classify_segment(path))
-        return results
+            return self.classify_segment(path)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_run, p): i for i, p in enumerate(video_paths)}
+            indexed = [None] * len(video_paths)
+            for future in as_completed(futures):
+                indexed[futures[future]] = future.result()
+
+        return indexed
 
     def is_highlight(self, result: dict, min_confidence: float = 0.55) -> bool:
         """Return True if a segment is highlight-worthy."""
