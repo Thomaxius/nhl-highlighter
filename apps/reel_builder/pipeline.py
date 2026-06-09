@@ -33,6 +33,7 @@ from src.detection.banner_detector import BannerDetector
 from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
 from src.detection.pause_menu_detector import PauseMenuDetector
+from src.detection.stats_detector import detect_stats_screens, save_stats_csv, format_description
 from src.assembly.reel_builder import build_reel
 
 logging.basicConfig(
@@ -970,6 +971,49 @@ def run_pipeline(
         confirmed_period_boundaries=confirmed_period_boundaries,
     )
     logger.info("Done!  Reel → %s", output_path)
+
+    # ── Step 7: Stats screen detection ──────────────────────────────────────
+    # Scan each normalised clip for end-of-game stats screens.
+    # Results are written as CSVs in a per-reel subfolder, the parsed tables
+    # are logged in full, and a YouTube description file is saved alongside
+    # the reel so the uploader can attach the stats to the video description.
+    logger.info("━━━  Step 7: Stats screen detection  ━━━")
+    # Per-video stats folder: exports/{reel_stem}/stats/
+    stats_out_dir = output_path.with_suffix("") / "stats"
+    all_stats: list = []
+    for clip in normalised:
+        screens = detect_stats_screens(clip)
+        if screens:
+            saved = save_stats_csv(screens, stats_out_dir)
+            all_stats.extend(screens)
+            for s, path in zip(screens, saved):
+                logger.info(
+                    "  %s / %s  (%d rows) → %s",
+                    s.team, s.tab, len(s.rows), path,
+                )
+                # Log the full table
+                if s.rows:
+                    cols = list(s.rows[0].keys())
+                    widths = {c: max(len(c), max(len(r.get(c, "")) for r in s.rows)) for c in cols}
+                    sep = "+-" + "-+-".join("-" * widths[c] for c in cols) + "-+"
+                    hdr = "| " + " | ".join(c.ljust(widths[c]) for c in cols) + " |"
+                    logger.info("  %s", sep)
+                    logger.info("  %s", hdr)
+                    logger.info("  %s", sep)
+                    for row in s.rows:
+                        logger.info("  | " + " | ".join(row.get(c, "").ljust(widths[c]) for c in cols) + " |")
+                    logger.info("  %s", sep)
+    if not all_stats:
+        logger.info("  No stats screens found.")
+
+    # Save the YouTube description (title substituted by the uploader)
+    description_path = output_path.with_suffix(".txt")
+    try:
+        desc = format_description(title="__TITLE__", screens=all_stats)
+        description_path.write_text(desc, encoding="utf-8")
+        logger.info("  Description template → %s", description_path)
+    except Exception as _exc:
+        logger.warning("  Could not write description file: %s", _exc)
 
 
 def main():

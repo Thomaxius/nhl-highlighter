@@ -207,7 +207,18 @@ def run_pipeline(input_file: Path, output_file: Path):
 
 def upload_highlight(video_file: Path, title: str) -> str | None:
     """Upload the reel and return the new YouTube video ID (or None if unparseable)."""
-    description = UPLOAD_DESCRIPTION_TEMPLATE.format(title=title)
+    # pipeline.py saves a description template with "__TITLE__" as a placeholder.
+    # Use it if present; otherwise fall back to the built-in template.
+    desc_file = video_file.with_suffix(".txt")
+    if desc_file.exists():
+        try:
+            description = desc_file.read_text(encoding="utf-8").replace("__TITLE__", title, 1)
+            logger.info("Using stats description from %s", desc_file.name)
+        except Exception as exc:
+            logger.warning("Could not read description file %s: %s — using default", desc_file, exc)
+            description = UPLOAD_DESCRIPTION_TEMPLATE.format(title=title)
+    else:
+        description = UPLOAD_DESCRIPTION_TEMPLATE.format(title=title)
     result = subprocess.run(
         [
             str(VENV_PYTHON),

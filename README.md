@@ -66,7 +66,11 @@ PS5 clips (.mp4)
     ↓ Step 4f  — Chain goal → celebration → replay sequences
     ↓ Step 5   — Segment scoring (confidence + audio boost)
     ↓ Step 6   — FFmpeg concat: intro → goal chains → game_end outro
+    ↓ Step 7   — End-of-game stats detection: parse skater/goalie tables, save CSVs, build YouTube description
     → data/exports/<game>_reel.mp4
+    → data/exports/<game>_reel/<team>_all_skaters.csv  (stats CSVs)
+    → data/exports/<game>_reel/<team>_goalies.csv
+    → data/exports/<game>_reel.txt                     (YouTube description with stats)
 ```
 
 ### What each detection step does
@@ -79,6 +83,7 @@ PS5 clips (.mp4)
 | VS screen detector | Template match | Detects pre-game matchup screen for intro clip |
 | Pause menu detector | Template match | Removes ESC menu frames from the reel |
 | Score detector | OCR (Tesseract) | Tracks shots on goal for context |
+| Stats screen detector | Template match + OCR | Detects end-of-game stats screens; parses skater and goalie tables for both teams; exports CSVs and YouTube description |
 
 ---
 
@@ -96,11 +101,15 @@ nhl-highlighter/
 │   │   │   ├── goal_banner_template*.png
 │   │   │   ├── game_end_template.png
 │   │   │   ├── vs_screen_template.png
-│   │   │   └── pause_menu_template.png
+│   │   │   ├── pause_menu_template.png
+│   │   │   ├── stats_tab_all_skaters_template.png
+│   │   │   ├── stats_tab_goalies_template.png
+│   │   │   └── stats_back_sort_template.png
 │   │   ├── src/
 │   │   │   ├── ingestion/           # FFmpeg normalisation
 │   │   │   ├── preprocessing/       # Scene splitting, audio analysis
 │   │   │   ├── detection/           # VideoMAE classifier + template detectors
+│   │   │   │   └── stats_detector.py  # End-of-game stats screen parser
 │   │   │   ├── assembly/            # FFmpeg concat + overlays
 │   │   │   └── utils/
 │   │   └── tools/                   # Dev helpers (debug_banner, etc.)
@@ -110,7 +119,14 @@ nhl-highlighter/
 │   ├── uploader/
 │   │   └── upload_youtube.py        # YouTube upload CLI
 │   └── shared/
-│       ├── data/                    # Runtime data (raw, processed, exports, labeled)
+│       ├── data/
+│       │   ├── raw/                 # Downloaded PS5 recordings
+│       │   ├── processed/           # Normalised clips + scene segments
+│       │   ├── labeled/             # Training data (subfolders = class names)
+│       │   └── exports/             # Finished reels + per-game stats
+│       │       ├── <game>_reel.mp4
+│       │       ├── <game>_reel.txt  # YouTube description (title + stats + disclaimer)
+│       │       └── <game>_reel/stats/  # Per-team CSV stats tables
 │       ├── models/                  # Model checkpoints and exports
 │       └── training-data/           # Raw source clips by category
 ├── config/
@@ -120,6 +136,8 @@ nhl-highlighter/
 ├── infra/
 │   └── ansible/                     # Server provisioning playbooks
 ├── tests/
+│   ├── fixtures/                    # 1-minute video chunks for detector testing
+│   └── test_stats_detector.py
 ├── requirements.txt
 └── requirements-server.txt
 ```
@@ -277,8 +295,13 @@ OpenCV template matching requires cropped reference images in `configs/`. Replac
 | `game_end_template.png` | Clock region (top-left HUD) | Game clock detector |
 | `vs_screen_template.png` | VS matchup screen | VS screen detector |
 | `pause_menu_template.png` | Top-left ~250×80px of pause/ESC menu | Pause menu detector |
+| `stats_tab_all_skaters_template.png` | Active "ALL SKATERS" tab label | Stats screen detector |
+| `stats_tab_goalies_template.png` | Active "GOALIES" tab label | Stats screen detector |
+| `stats_back_sort_template.png` | BACK / SORT button bar (appears when table is fully loaded) | Stats screen detector |
 
 Multiple `goal_banner_template` files (numbered 1–N) handle different team banner colours.
+
+The stats templates are team-independent — they match fixed UI text ("ALL SKATERS", "GOALIES") and a button bar that is identical regardless of which team is playing.
 
 ---
 
