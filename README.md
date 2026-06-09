@@ -7,6 +7,30 @@ The end goal is to have a pipeline that automatically detects uploaded YouTube c
 ## Notes
 This project is a quick 100% vibe coded slop for personal use. I didn't even write this disclaimer myself. Please don't let it be a reason for not headhunting, or let it be, but don't let the quality of programming or lack of it be it.
 
+- [NHL 25 Highlight Reel Generator](#nhl-25-highlight-reel-generator)
+  - [Notes](#notes)
+  - [Architecture](#architecture)
+  - [Pipeline Overview](#pipeline-overview)
+    - [What each detection step does](#what-each-detection-step-does)
+  - [Project Structure](#project-structure)
+  - [Setup](#setup)
+    - [OAuth Setup (required for poller + uploader)](#oauth-setup-required-for-poller--uploader)
+  - [App 1 — Poller (`apps/poller`)](#app-1--poller-appspoller)
+  - [App 2 — Reel Builder (`apps/reel_builder`)](#app-2--reel-builder-appsreel_builder)
+  - [App 3 — Uploader (`apps/uploader`)](#app-3--uploader-appsuploader)
+  - [Labelling Training Data](#labelling-training-data)
+  - [Training](#training)
+  - [Template Images](#template-images)
+  - [Tech Stack](#tech-stack)
+  - [Development](#development)
+  - [Project Structure](#project-structure-1)
+  - [Quick Start](#quick-start)
+    - [1. Set Up Environment](#1-set-up-environment)
+    - [2. Get Clips Off PS5](#2-get-clips-off-ps5)
+    - [3. Run the Full Pipeline](#3-run-the-full-pipeline)
+  - [Labelling Training Data](#labelling-training-data-1)
+
+
 ---
 
 ## Architecture
@@ -22,6 +46,39 @@ apps/
 
 The full automated flow is: **poller** detects a new upload → invokes **reel_builder** → invokes **uploader**.
 All three can also be run independently.
+
+---
+
+## Pipeline Overview
+
+```
+PS5 clips (.mp4)
+    ↓ Step 1   — FFmpeg normalise (1080p30, libx264)
+    ↓ Step 2   — PySceneDetect → scene segments
+    ↓ Step 3   — librosa audio spike detection
+    ↓ Step 4   — VideoMAE classifier → goal / celebration / replay / scoring_chance / other
+    ↓ Step 4b  — GOAL! banner detection (OpenCV template match, raw video scan)
+    ↓ Step 4c  — Banner override: banner-detected segments are forced to "goal"; banner is ground truth
+    ↓ Step 4d  — Game clock detection (OCR): tag final 8s + 20s post-buzzer as game_end
+    ↓ Step 4d.5— VS screen detection: tag pre-game intro segment
+    ↓ Step 4d.9— Pause menu detection: demote ESC/menu segments
+    ↓ Step 4e  — Score/SOG change detection (OCR)
+    ↓ Step 4f  — Chain goal → celebration → replay sequences
+    ↓ Step 5   — Segment scoring (confidence + audio boost)
+    ↓ Step 6   — FFmpeg concat: intro → goal chains → game_end outro
+    → data/exports/<game>_reel.mp4
+```
+
+### What each detection step does
+
+| Step | Method | Purpose |
+|---|---|---|
+| VideoMAE classifier | ML model | Broad scene categorisation |
+| Banner detector | Template match | Confirms real goals (prevents false positives) |
+| Game clock detector | OCR (Tesseract) | Finds exact final buzzer timestamp for outro clip |
+| VS screen detector | Template match | Detects pre-game matchup screen for intro clip |
+| Pause menu detector | Template match | Removes ESC menu frames from the reel |
+| Score detector | OCR (Tesseract) | Tracks shots on goal for context |
 
 ---
 
@@ -151,37 +208,6 @@ python apps/reel_builder/pipeline.py \
 
 Output is saved to `data/exports/` automatically.
 
-### Pipeline Overview
-
-```
-PS5 clips (.mp4)
-    ↓ Step 1   — FFmpeg normalise (1080p30, libx264)
-    ↓ Step 2   — PySceneDetect → scene segments
-    ↓ Step 3   — librosa audio spike detection
-    ↓ Step 4   — VideoMAE classifier → goal / celebration / replay / scoring_chance / other
-    ↓ Step 4b  — GOAL! banner detection (OpenCV template match)
-    ↓ Step 4c  — Banner gating: demote any "goal" without confirmed banner
-    ↓ Step 4d  — Game clock detection (OCR): tag final 8s + 20s post-buzzer
-    ↓ Step 4d.5— VS screen detection: tag pre-game intro segment
-    ↓ Step 4d.9— Pause menu detection: demote ESC/menu segments
-    ↓ Step 4e  — Score/SOG change detection (OCR)
-    ↓ Step 4f  — Chain goal → celebration → replay sequences
-    ↓ Step 5   — Segment scoring (confidence + audio boost)
-    ↓ Step 6   — FFmpeg concat: intro → goal chains → game_end outro
-    → data/exports/<game>_reel.mp4
-```
-
-### Detection Methods
-
-| Step | Method | Purpose |
-|---|---|---|
-| VideoMAE classifier | ML model | Broad scene categorisation |
-| Banner detector | Template match | Confirms real goals (prevents false positives) |
-| Game clock detector | OCR (Tesseract) | Finds exact final buzzer timestamp |
-| VS screen detector | Template match | Detects pre-game matchup screen for intro |
-| Pause menu detector | Template match | Removes ESC menu frames |
-| Score detector | OCR (Tesseract) | Tracks shots on goal for context |
-
 ---
 
 ## App 3 — Uploader (`apps/uploader`)
@@ -215,7 +241,7 @@ data/labeled/
     other_replay/    → cutscenes, non-goal replays, coach/crowd reactions
     scoring_chance/  → shot on goal that didn't score (no banner)
     other/           → faceoffs, stoppages, normal gameplay
-    transition/      → very short black-frame cuts between scenes
+    transition/      → very short black-frame cuts / transition screens between scenes
 ```
 
 Use the interactive labelling tool:
@@ -231,8 +257,6 @@ Keyboard shortcuts: `g` goal · `c` celebration · `r` goal_replay · `n` other_
 
 ## Training
 
-Training requires a GPU. Use [Runpod](https://runpod.io) or [Lambda Labs](https://lambdalabs.com) (~$0.50/hr).
-
 ```bash
 python -m apps.trainer.src.training.trainer \
     --data_dir apps/shared/data/labeled \
@@ -240,8 +264,6 @@ python -m apps.trainer.src.training.trainer \
     --epochs 10 \
     --batch_size 4
 ```
-
-Set `WANDB_API_KEY` to track experiments at [wandb.ai](https://wandb.ai).
 
 ---
 
@@ -257,14 +279,6 @@ OpenCV template matching requires cropped reference images in `configs/`. Replac
 | `pause_menu_template.png` | Top-left ~250×80px of pause/ESC menu | Pause menu detector |
 
 Multiple `goal_banner_template` files (numbered 1–N) handle different team banner colours.
-
-### TODO — Additional templates that would improve detection reliability
-
-| File | What to crop | Benefit |
-|---|---|---|
-| `period_start_clock_template_2nd.png` | Clock region showing exactly `20:00 2ND` | Rock-solid 2nd-period start detection; current OCR occasionally misreads "2ND" |
-| `period_start_clock_template_3rd.png` | Clock region showing exactly `20:00 3RD` | Same for 3rd period; OCR has misread this as "SRD" |
-| `intermission_screen_template.png` | Distinctive intermission stats/recap screen | Direct intermission signal; avoids relying on period_end→game_start inference to suppress false goal inference during intermissions |
 
 ---
 
@@ -383,39 +397,6 @@ python pipeline.py \
     --music path/to/music.mp3 \
     --max_clips 10
 ```
-
----
-
-## Pipeline Overview
-
-```
-PS5 clips (.mp4)
-    ↓ Step 1   — FFmpeg normalise (1080p30, libx264)
-    ↓ Step 2   — PySceneDetect → scene segments
-    ↓ Step 3   — librosa audio spike detection
-    ↓ Step 4   — VideoMAE classifier → goal / celebration / replay / scoring_chance / other
-    ↓ Step 4b  — GOAL! banner detection (OpenCV template match, raw video scan)
-    ↓ Step 4c  — Banner gating: demote any "goal" without confirmed banner
-    ↓ Step 4d  — Game clock detection (OCR): tag final 8s + 20s post-buzzer as game_end
-    ↓ Step 4d.5— VS screen detection: tag pre-game intro segment
-    ↓ Step 4d.9— Pause menu detection: demote ESC/menu segments
-    ↓ Step 4e  — Score/SOG change detection (OCR)
-    ↓ Step 4f  — Chain goal → celebration → replay sequences
-    ↓ Step 5   — Segment scoring (confidence + audio boost)
-    ↓ Step 6   — FFmpeg concat: intro → goal chains → game_end outro
-    → data/exports/<game>_reel.mp4
-```
-
-### What each detection step does
-
-| Step | Method | Purpose |
-|---|---|---|
-| VideoMAE classifier | ML model | Broad scene categorisation |
-| Banner detector | Template match | Confirms real goals (prevents false positives) |
-| Game clock detector | OCR (Tesseract) | Finds exact final buzzer timestamp for outro clip |
-| VS screen detector | Template match | Detects pre-game matchup screen for intro clip |
-| Pause menu detector | Template match | Removes ESC menu frames from the reel |
-| Score detector | OCR (Tesseract) | Tracks shots on goal for context |
 
 ---
 
