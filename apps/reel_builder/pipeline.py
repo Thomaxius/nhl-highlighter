@@ -1139,6 +1139,85 @@ def run_pipeline(
         logger.warning("  Could not write description file: %s", _exc)
 
 
+def run_smoke_test(checkpoint: str) -> int:
+    """
+    Verify the environment can actually run the pipeline, without processing
+    any video. Reaching this function already proves every module import
+    (cv2, torch, librosa, pytesseract, …) succeeded — what imports alone
+    can't prove is that external binaries and required assets are present:
+    pytesseract imports fine without the tesseract binary and only fails at
+    call time, hours into a run.
+
+    Returns 0 if everything passed, 1 otherwise.
+    """
+    import shutil
+    import subprocess
+
+    failures = 0
+
+    def _check(name: str, fn) -> None:
+        nonlocal failures
+        try:
+            detail = fn()
+            logger.info("  OK   %s%s", name, f"  ({detail})" if detail else "")
+        except Exception as exc:
+            logger.error("  FAIL %s: %s", name, exc)
+            failures += 1
+
+    def _binary(cmd: str) -> str:
+        path = shutil.which(cmd)
+        if not path:
+            raise FileNotFoundError(f"'{cmd}' not found in PATH")
+        out = subprocess.run([cmd, "-version"], capture_output=True, text=True)
+        return out.stdout.splitlines()[0] if out.stdout else path
+
+    logger.info("━━━  Smoke test  ━━━")
+    logger.info("Module imports: OK (this script would not have started otherwise)")
+
+    _check("ffmpeg", lambda: _binary("ffmpeg"))
+    _check("ffprobe", lambda: _binary("ffprobe"))
+
+    def _tesseract() -> str:
+        import pytesseract
+        version = pytesseract.get_tesseract_version()
+        langs = pytesseract.get_languages(config="")
+        if "eng" not in langs:
+            raise RuntimeError(f"tesseract {version} found but 'eng' language pack missing")
+        return f"tesseract {version}"
+    _check("tesseract + eng language", _tesseract)
+
+    def _checkpoint() -> str:
+        ckpt = Path(checkpoint)
+        if not ckpt.is_dir() or not any(ckpt.iterdir()):
+            raise FileNotFoundError(f"model checkpoint missing or empty: {ckpt}")
+        return str(ckpt)
+    _check("VideoMAE checkpoint", _checkpoint)
+
+    def _templates() -> str:
+        cfg_dir = Path("apps/reel_builder/configs")
+        banners = list(cfg_dir.glob("goal_banner_template*.png"))
+        if not banners:
+            raise FileNotFoundError(f"no goal banner templates in {cfg_dir}")
+        missing = [
+            n for n in (
+                "game_end_template.png",
+                "vs_screen_template3.png",
+                "pause_menu_template.png",
+            )
+            if not (cfg_dir / n).exists()
+        ]
+        if missing:
+            raise FileNotFoundError(f"missing templates: {', '.join(missing)}")
+        return f"{len(banners)} banner template(s) + clock/vs/pause"
+    _check("detection templates", _templates)
+
+    if failures:
+        logger.error("Smoke test FAILED — %d check(s) failed.", failures)
+    else:
+        logger.info("Smoke test passed — environment looks runnable.")
+    return 1 if failures else 0
+
+
 def main():
     p = argparse.ArgumentParser(description="NHL 25 Highlight Reel Generator")
 
@@ -1155,7 +1234,12 @@ def main():
                    help="Min confidence for scoring_chance clips")
     p.add_argument("--sc_rescue_confidence", type=float, default=_CFG["pipeline"]["sc_rescue_confidence"],
                    help="Demoted no-banner goals at/above this become scoring chances")
+    p.add_argument("--smoke-test", action="store_true",
+                   help="Verify imports, external binaries and required assets, then exit")
     args = p.parse_args()
+
+    if args.smoke_test:
+        raise SystemExit(run_smoke_test(checkpoint=args.checkpoint))
 
     if args.file:
         # Wrap the single file in a temp dir so the pipeline's ingest step

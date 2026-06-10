@@ -24,6 +24,13 @@
         - { src: ../apps/poller/youtube_watcher.py, dest: apps/poller/youtube_watcher.py }
         - { src: ../apps/uploader/upload_youtube.py, dest: apps/uploader/upload_youtube.py }
 
+    - name: Smoke-test the pipeline environment
+      become_user: "{{ app_user }}"
+      ansible.builtin.command:
+        cmd: "{{ venv_dir }}/bin/python apps/reel_builder/pipeline.py --smoke-test"
+        chdir: "{{ app_dir }}"
+      changed_when: false
+
     - name: Restart watcher service
       ansible.builtin.systemd:
         name: nhl-watcher
