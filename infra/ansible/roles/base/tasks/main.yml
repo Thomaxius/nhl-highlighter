@@ -25,6 +25,47 @@
       - nodejs  # required by yt-dlp EJS challenge solver (must be v22+)
     state: present
 
+# 8 GB swap: the pipeline peaks near the 8 GB RAM limit during concurrent
+# video scans — swap absorbs the spikes instead of the OOM killer firing.
+- name: Check if swapfile exists
+  ansible.builtin.stat:
+    path: /swapfile
+  register: swapfile_stat
+
+- name: Create 8G swapfile
+  ansible.builtin.command: fallocate -l 8G /swapfile
+  when: not swapfile_stat.stat.exists
+
+- name: Secure swapfile permissions
+  ansible.builtin.file:
+    path: /swapfile
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Format swapfile
+  ansible.builtin.command: mkswap /swapfile
+  when: not swapfile_stat.stat.exists
+
+- name: Enable swapfile in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "/swapfile none swap sw 0 0"
+
+- name: Activate swap now
+  ansible.builtin.command: swapon /swapfile
+  when: ansible_swaptotal_mb < 1024
+
+- name: Only swap under memory pressure
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-swappiness.conf
+    content: "vm.swappiness=10\n"
+  register: swappiness_conf
+
+- name: Apply swappiness
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-swappiness.conf
+  when: swappiness_conf.changed
+
 - name: Create app user
   ansible.builtin.user:
     name: "{{ app_user }}"

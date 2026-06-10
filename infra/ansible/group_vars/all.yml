@@ -1,7 +1,7 @@
 ---
 app_user: nhl
 app_dir: /opt/nhl-highlighter
-venv_dir: /opt/nhl-highlighter/venv
+venv_dir: /opt/nhl-highlighter/.venv
 
 repo_url: https://github.com/Thomaxius/nhl-highlighter.git
 repo_branch: main
