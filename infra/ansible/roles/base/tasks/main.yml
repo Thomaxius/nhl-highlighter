@@ -18,8 +18,18 @@
       - ffmpeg
       - tesseract-ocr
       - tesseract-ocr-eng
+      # OpenCV dependencies
       - libgl1
       - libglib2.0-0t64
+      - libxcb1
+      - libsm6
+      - libxext6
+      - libxrender-dev
+      - libgomp1
+      - libopenblas0
+      - liblapack3
+      - libglu1-mesa
+      # System utilities
       - htop
       - ufw
       - nodejs  # required by yt-dlp EJS challenge solver (must be v22+)
