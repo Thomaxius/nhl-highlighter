@@ -627,9 +627,13 @@ DEFAULT_DISCLAIMER = (
 
 def _plausible_name(name: str) -> bool:
     """True if the OCR'd player name looks like a real name rather than a
-    stray fragment (e.g. '[s.chow', 'es,')."""
+    stray fragment (e.g. '[s.chow', 'es,', 'fe i OD')."""
     name = name.strip()
-    return bool(name) and name[0].isalpha() and sum(c.isalpha() for c in name) >= 3
+    if not name or not name[0].isalpha():
+        return False
+    # A real name has at least one token with 3+ letters (the surname);
+    # junk fragments are strings of 1–2 letter tokens.
+    return any(sum(c.isalpha() for c in tok) >= 3 for tok in name.split())
 
 
 def _int_or_none(value: str | None) -> int | None:

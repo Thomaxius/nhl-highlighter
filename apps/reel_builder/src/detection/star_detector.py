@@ -60,9 +60,9 @@ STAR_THRESHOLD:  float = 0.95
 
 # ── Regions ────────────────────────────────────────────────────────────────────
 BANNER_Y0, BANNER_Y1 = 230, 320
-BANNER_X0, BANNER_X1 = 480, 1440   # centre 960 px — avoids score/HUD on edges
+BANNER_X0, BANNER_X1 = 0, 960      # left 960 px — the star card panel; the score HUD is centre/right
 
-NAME_X0,   NAME_X1  = 90,  300
+NAME_X0,   NAME_X1  = 90,  310   # X1 wide enough that long surnames ('Tkachuk') don't clip
 NAME_Y0,   NAME_Y1  = 635, 740
 NAME_MID_Y           = 688
 
@@ -111,7 +111,14 @@ def _ocr_first_name(frame: np.ndarray) -> str:
                      interpolation=cv2.INTER_CUBIC)
     _, thresh = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     raw = pytesseract.image_to_string(thresh, config="--psm 11 --oem 1").strip()
-    return " ".join(w for w in raw.split() if sum(c.isalpha() for c in w) >= 3)
+    words = [w for w in raw.split() if sum(c.isalpha() for c in w) >= 3]
+    if not words:
+        return ""
+    # The first-name row holds a single word; PSM 11 sometimes adds stray
+    # fragments from the card background (e.g. 'Aat', 'OiQUONONOCN'). Keep
+    # the most name-like token: title case beats mixed case, then longer
+    # beats shorter, ties keep the earliest.
+    return max(words, key=lambda w: (w[:1].isupper() and w[1:].islower(), len(w)))
 
 
 def _ocr_last_name(frame: np.ndarray) -> str:
@@ -123,12 +130,23 @@ def _ocr_last_name(frame: np.ndarray) -> str:
     big = cv2.resize(r, (r.shape[1] * 4, r.shape[0] * 4),
                      interpolation=cv2.INTER_CUBIC)
     _, t = cv2.threshold(big, thresh_val, 255, cv2.THRESH_BINARY)
-    raw = pytesseract.image_to_string(t, config="--psm 11 --oem 1").strip()
-    candidates = sorted(
-        [w for w in raw.split() if sum(c.isalpha() for c in w) >= 3],
-        key=len, reverse=True,
+    # The crop spans both name rows (the percentile threshold needs the full
+    # region's pixel distribution). The last name is the BOTTOM text row, so
+    # pick by word position rather than by length — a longer first name would
+    # otherwise win (e.g. 'Martin' over 'Necas').
+    data = pytesseract.image_to_data(
+        t, config="--psm 11 --oem 1", output_type=pytesseract.Output.DICT
     )
-    return candidates[0] if candidates else ""
+    cands = [
+        (top, w.strip())
+        for w, top in zip(data["text"], data["top"])
+        if sum(c.isalpha() for c in w.strip()) >= 3
+    ]
+    if not cands:
+        return ""
+    bottom_top = max(top for top, _ in cands)
+    same_row = [w for top, w in cands if top >= bottom_top - 60]  # ×4-scaled px
+    return max(same_row, key=len)
 
 
 def _stats_per_digit(r: np.ndarray) -> list[str] | None:
