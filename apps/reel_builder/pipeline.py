@@ -478,7 +478,11 @@ def run_pipeline(
             "━━━  Parallel scan: %s  (banner=%s  clock=%s  vs=%s)  ━━━",
             _bsc_clip.name, bool(_bsc_banner), bool(_bsc_clock), bool(_bsc_vs),
         )
-        with _ScanPool(max_workers=3) as _bsc_pool:
+        # max_workers=2 (not 3): each scan holds its own FFmpeg decoder whose
+        # frame buffers add up — three concurrent 1080p decodes OOM-killed the
+        # pipeline on the 8 GB server. The VS scan is capped at 300 s, so it
+        # just queues behind whichever full-length scan finishes first.
+        with _ScanPool(max_workers=2) as _bsc_pool:
             _bsc_bf = _bsc_pool.submit(_bsc_banner.scan_video, _bsc_clip, 1.0) if _bsc_banner else None
             _bsc_cf = _bsc_pool.submit(_bsc_clock.scan_video,  _bsc_clip)      if _bsc_clock  else None
             # VS screen only appears in the first few minutes of a recording;
@@ -1032,9 +1036,11 @@ def run_pipeline(
     # reel — and Step 6 spends nearly all its time waiting on FFmpeg
     # subprocesses, so the OCR work runs concurrently with the reel build.
     # Results are collected (and logged/saved) after build_reel returns.
+    # max_workers=1: the two scans run sequentially but still fully overlap
+    # the reel build, while holding only one extra video decoder in memory.
     from concurrent.futures import ThreadPoolExecutor as _StatsPool
     logger.info("━━━  Steps 7 + 7b: Stats + Star screen scans (background)  ━━━")
-    _stats_pool = _StatsPool(max_workers=2)
+    _stats_pool = _StatsPool(max_workers=1)
     _stats_future = _stats_pool.submit(
         lambda: [detect_stats_screens(clip) for clip in normalised]
     )
