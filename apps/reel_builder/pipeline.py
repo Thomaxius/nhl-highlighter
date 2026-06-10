@@ -191,6 +191,94 @@ def _drop_empty_inferred_goals(results: list[dict]) -> list[dict]:
     return results
 
 
+def _prior_context(results: list[dict], i: int) -> str:
+    """
+    Classify what precedes results[i]: "normal" play, the "replay_tail" of a
+    prior goal, or an inter-period "intermission".
+
+    Walk backward through the results list and stop at the first meaningful
+    boundary, then classify the candidate accordingly:
+
+        game_start / period_start first
+            → puck has already dropped in this period; normal play
+        period_end first (no puck-drop seen between it and the candidate)
+            → candidate is in the inter-period intermission
+        faceoff / faceoff_cutscene first
+            → play resumed after a goal; prior sequence is closed → normal
+        banner_detected / inferred_goal first
+            → still inside that goal's replay tail
+        no boundary found (start of file)
+            → very early in the recording; treat as normal play
+    """
+    for back_idx in range(i - 1, -1, -1):
+        prev = results[back_idx]
+        if prev.get("game_start") or prev.get("period_start"):
+            return "normal"
+        if prev.get("period_end"):
+            return "intermission"
+        if prev.get("label") in {"faceoff_cutscene", "faceoff"}:
+            return "normal"
+        if prev.get("banner_detected") or prev.get("inferred_goal"):
+            return "replay_tail"
+    return "normal"
+
+
+def _rescue_demoted_goals(results: list[dict]) -> list[dict]:
+    """
+    Re-label high-confidence demoted goals as scoring chances.
+
+    Step 4c demotes every goal-labelled segment without a banner to `other`,
+    flagging it sc_rescue_candidate when the ML confidence met the rescue
+    threshold. Real goals among them are recovered by faceoff-pattern
+    inference; what remains is usually genuine goal-like play that never
+    produced a banner — i.e. a scoring chance worth showing. Rescue those as
+    `scoring_chance`, unless a later step revealed the segment is structural
+    content (period/game boundaries, intermission, pause menu) or the replay
+    tail of a goal that is already in the reel.
+
+    Must run after _drop_empty_inferred_goals so candidates that were
+    promoted to inferred goals and then dropped fall back to scoring_chance
+    rather than disappearing entirely.
+    """
+    rescued = 0
+    for i, seg in enumerate(results):
+        if not seg.get("sc_rescue_candidate"):
+            continue
+        # Recovered as a real goal via inference (or otherwise re-labelled)
+        if seg.get("label") != "other" or seg.get("banner_detected") or seg.get("inferred_goal"):
+            continue
+
+        skip_reason = None
+        if seg.get("has_menu"):
+            skip_reason = "pause menu"
+        elif seg.get("intro") or seg.get("game_start") or seg.get("period_start"):
+            skip_reason = "game/period start"
+        elif seg.get("period_end") or seg.get("game_end") or seg.get("regulation_end"):
+            skip_reason = "game/period end"
+        else:
+            context = _prior_context(results, i)
+            if context == "replay_tail":
+                skip_reason = "replay tail of a prior goal"
+            elif context == "intermission":
+                skip_reason = "inter-period intermission"
+        if skip_reason:
+            logger.info(
+                "  Rescue skipped (%s): %s",
+                skip_reason, Path(seg["path"]).name,
+            )
+            continue
+
+        seg["label"] = "scoring_chance"
+        logger.info(
+            "  Rescued demoted goal → scoring_chance: %s (conf=%.0f%%)",
+            Path(seg["path"]).name, seg.get("confidence", 0.0) * 100,
+        )
+        rescued += 1
+    if rescued:
+        logger.info("  Rescued %d demoted goal(s) as scoring chance(s).", rescued)
+    return results
+
+
 def _get_clip_duration(video_path) -> float:
     """Return the duration of a video clip in seconds."""
     import cv2
@@ -242,47 +330,14 @@ def _infer_goals_from_faceoff_pattern(
 
         # Backward scan: determine whether this candidate is in normal play,
         # inside a prior goal's replay tail, or in an inter-period intermission.
-        #
-        # Walk backward through the results list and stop at the first
-        # meaningful boundary, then classify the candidate accordingly:
-        #
-        #   game_start / period_start first
-        #       → puck has already dropped in this period; normal play → allow
-        #   period_end first (no puck-drop seen between it and the candidate)
-        #       → candidate is in the inter-period intermission → skip
-        #   faceoff / faceoff_cutscene first
-        #       → play resumed after a goal; prior sequence is closed → allow
-        #   banner_detected / inferred_goal first
-        #       → still inside that goal's replay tail → skip
-        #   no boundary found (start of file)
-        #       → very early in the recording; treat as normal play → allow
-        in_prior_goal_sequence = False
-        in_intermission        = False
-        for back_idx in range(i - 1, -1, -1):
-            prev = results[back_idx]
-            if prev.get("game_start") or prev.get("period_start"):
-                # Puck has already dropped in the current period — normal play.
-                break
-            if prev.get("period_end"):
-                # Period ended before any puck-drop was seen scanning backwards
-                # → this candidate sits in the inter-period intermission.
-                in_intermission = True
-                break
-            if prev.get("label") in {"faceoff_cutscene", "faceoff"}:
-                # A faceoff separates the candidate from any earlier goal —
-                # play has resumed, prior goal sequence is closed.
-                break
-            if prev.get("banner_detected") or prev.get("inferred_goal"):
-                # Candidate is still inside a prior confirmed goal's replay tail.
-                in_prior_goal_sequence = True
-                break
-        if in_prior_goal_sequence:
+        context = _prior_context(results, i)
+        if context == "replay_tail":
             logger.info(
                 "  Skipping faceoff-pattern inference — replay tail of a prior goal: %s",
                 Path(seg["path"]).name,
             )
             continue
-        if in_intermission:
+        if context == "intermission":
             logger.info(
                 "  Skipping faceoff-pattern inference — inter-period intermission: %s",
                 Path(seg["path"]).name,
@@ -343,6 +398,7 @@ def run_pipeline(
     max_clips: int = _CFG["pipeline"]["max_clips"],
     min_confidence: float = _CFG["pipeline"]["min_confidence"],
     sc_min_confidence: float = _CFG["pipeline"]["sc_min_confidence"],
+    sc_rescue_confidence: float = _CFG["pipeline"]["sc_rescue_confidence"],
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -539,10 +595,15 @@ def run_pipeline(
             r["label"] = "goal"
             r["confidence"] = 1.0
         elif r.get("label") == "goal":
-            # No banner = no goal, regardless of model confidence
+            # No banner = no goal, regardless of model confidence.
+            # High-confidence misses are flagged for the scoring-chance rescue
+            # pass (step 4f.5) once structural tags are known.
+            if r.get("confidence", 0) >= sc_rescue_confidence:
+                r["sc_rescue_candidate"] = True
             logger.info(
-                "  Demoted → other: %s (conf=%.0f%%, no banner)",
+                "  Demoted → other: %s (conf=%.0f%%, no banner%s)",
                 Path(r["path"]).name, r.get("confidence", 0) * 100,
+                ", sc-rescue candidate" if r.get("sc_rescue_candidate") else "",
             )
             r["label"] = "other"
             demoted += 1
@@ -950,6 +1011,10 @@ def run_pipeline(
     # they are almost always false positives and would emit a bare clip.
     results = _drop_empty_inferred_goals(results)
 
+    # ── Step 4f.5: Rescue high-confidence demoted goals as scoring chances ───
+    logger.info("━━━  Step 4f.5: Rescuing demoted goals as scoring chances  ━━━")
+    results = _rescue_demoted_goals(results)
+
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")
     for r in results:
@@ -1068,6 +1133,8 @@ def main():
     p.add_argument("--min_confidence", type=float, default=_CFG["pipeline"]["min_confidence"])
     p.add_argument("--sc_min_confidence", type=float, default=_CFG["pipeline"]["sc_min_confidence"],
                    help="Min confidence for scoring_chance clips")
+    p.add_argument("--sc_rescue_confidence", type=float, default=_CFG["pipeline"]["sc_rescue_confidence"],
+                   help="Demoted no-banner goals at/above this become scoring chances")
     args = p.parse_args()
 
     if args.file:
@@ -1092,6 +1159,7 @@ def main():
         max_clips=args.max_clips,
         min_confidence=args.min_confidence,
         sc_min_confidence=args.sc_min_confidence,
+        sc_rescue_confidence=args.sc_rescue_confidence,
     )
 
 

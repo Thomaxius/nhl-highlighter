@@ -3,6 +3,7 @@ pipeline:
   max_clips: 20
   min_confidence: 0.55
   sc_min_confidence: 0.45   # minimum confidence for scoring_chance clips to enter reel
+  sc_rescue_confidence: 0.75  # demoted no-banner goals at/above this become scoring chances
   add_overlays: true
   music_path: null          # set to a .mp3 path to add background music
 
