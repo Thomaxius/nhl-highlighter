@@ -196,20 +196,16 @@ class BannerDetector:
             video_path.name, n_samples, interval_s,
         )
 
-        # Read all sampled frames sequentially (VideoCapture is not thread-safe),
-        # then run template matching in parallel (OpenCV/numpy releases the GIL).
-        frame_list: list[tuple[int, np.ndarray]] = []
-        for i in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if ret:
-                frame_list.append((i, frame))
-        cap.release()
-
+        # Read sampled frames sequentially (VideoCapture is not thread-safe)
+        # in small chunks, matching each chunk in parallel (OpenCV/numpy
+        # releases the GIL) before reading the next. Holding all samples at
+        # once would need ~6 MB per 1080p frame — tens of GB for a full game —
+        # which OOM-killed the pipeline; a chunk caps peak memory at ~200 MB.
         import os
         from concurrent.futures import ThreadPoolExecutor
 
         workers = min(4, max(1, os.cpu_count() or 2))
+        CHUNK_FRAMES = 32
 
         def _match(item: tuple[int, np.ndarray]) -> tuple[int, float]:
             idx, frm = item
@@ -217,14 +213,29 @@ class BannerDetector:
 
         raw_times: list[float] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for idx, conf in pool.map(_match, frame_list):
-                if conf >= self.threshold:
-                    t = idx / fps
-                    raw_times.append(t)
-                    logger.info(
-                        "  Raw-scan banner hit: t=%.2fs  frame=%d  conf=%.3f",
-                        t, idx, conf,
-                    )
+
+            def _flush(chunk: list[tuple[int, np.ndarray]]) -> None:
+                for idx, conf in pool.map(_match, chunk):
+                    if conf >= self.threshold:
+                        t = idx / fps
+                        raw_times.append(t)
+                        logger.info(
+                            "  Raw-scan banner hit: t=%.2fs  frame=%d  conf=%.3f",
+                            t, idx, conf,
+                        )
+
+            chunk: list[tuple[int, np.ndarray]] = []
+            for i in indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ret, frame = cap.read()
+                if ret:
+                    chunk.append((i, frame))
+                if len(chunk) >= CHUNK_FRAMES:
+                    _flush(chunk)
+                    chunk = []
+            if chunk:
+                _flush(chunk)
+        cap.release()
         raw_times.sort()
 
         # Merge consecutive hits within merge_gap_s into a single event
