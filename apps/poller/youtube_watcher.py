@@ -53,7 +53,7 @@ UPLOAD_DESCRIPTION_TEMPLATE = (
 )
 
 _is_windows = platform.system() == "Windows"
-_venv_root = APP_DIR / (".venv" if _is_windows else "venv")
+_venv_root = APP_DIR / ".venv"
 VENV_PYTHON = _venv_root / ("Scripts\\python.exe" if _is_windows else "bin/python")
 VENV_YTDLP  = _venv_root / ("Scripts\\yt-dlp.exe" if _is_windows else "bin/yt-dlp")
 YTDLP_COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE", "")
