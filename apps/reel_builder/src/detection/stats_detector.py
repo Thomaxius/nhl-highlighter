@@ -613,35 +613,83 @@ def save_stats_csv(screens: list[StatsScreen], output_dir: str | Path) -> list[P
     return written
 
 
-# ── Subset of columns shown in the YouTube description (keep it compact) ──────
-_DESC_SKATER_COLS = ["PLAYER", "MIN", "G", "A", "PTS", "+/-", "S", "HITS"]
-_DESC_GOALIE_COLS = ["PLAYER", "MIN", "SA", "S", "SV%", "GA", "GAA"]
-
 DEFAULT_DISCLAIMER = (
     "This highlight reel was automatically generated with NHL Highlighter:\n"
     "https://github.com/Thomaxius/nhl-highlighter"
 )
 
 
-def _format_table_text(rows: list[dict[str, str]], col_names: list[str]) -> str:
-    """Render a stats table as a compact plain-text block for YouTube descriptions."""
-    if not rows:
-        return "(no data)"
+# YouTube descriptions render in a proportional font, so space-aligned column
+# tables can never line up. Instead each player becomes one self-describing
+# line with inline labels — and rows whose OCR came out garbled (fragment
+# names, missing or implausible numbers) are dropped rather than printed
+# under the wrong header.
 
-    # Only keep columns that exist in the rows
-    cols = [c for c in col_names if any(r.get(c) for r in rows)]
-    if not cols:
-        return "(no data)"
+def _plausible_name(name: str) -> bool:
+    """True if the OCR'd player name looks like a real name rather than a
+    stray fragment (e.g. '[s.chow', 'es,')."""
+    name = name.strip()
+    return bool(name) and name[0].isalpha() and sum(c.isalpha() for c in name) >= 3
 
-    widths = {c: max(len(c), max(len(r.get(c, "")) for r in rows)) for c in cols}
-    header = "  ".join(c.ljust(widths[c]) for c in cols).rstrip()
-    sep    = "  ".join("-" * widths[c] for c in cols).rstrip()
 
-    lines = [header, sep]
+def _int_or_none(value: str | None) -> int | None:
+    value = (value or "").strip()
+    return int(value) if value.isdigit() else None
+
+
+def _star_stats_compact(stats: str) -> str:
+    """Reformat star_detector's 'GOALS: 2 | ASSISTS: 0 | HITS: 8' to the same
+    compact style as the skater lines: '2 G, 0 A, 8 hits'."""
+    m = re.fullmatch(r"GOALS: (\d+) \| ASSISTS: (\d+) \| HITS: (\d+)", stats.strip())
+    if not m:
+        return stats.strip()
+    g, a, h = m.groups()
+    return f"{g} G, {a} A, {h} hits"
+
+
+def _skater_lines(rows: list[dict[str, str]]) -> list[str]:
+    """One labeled line per skater: 'M. Beniers — 15:52 | 0 G, 2 A, 2 P | 3 hits'."""
+    lines: list[str] = []
     for r in rows:
-        line = "  ".join(r.get(c, "").ljust(widths[c]) for c in cols).rstrip()
+        name = r.get("PLAYER", "").strip().replace(",", ".")
+        if not _plausible_name(name):
+            continue
+        g, a, pts = (_int_or_none(r.get(c)) for c in ("G", "A", "PTS"))
+        # G + A must equal PTS — catches shifted cells and OCR misreads
+        if g is None or a is None or pts is None or g + a != pts:
+            continue
+        toi = r.get("MIN", "").strip()
+        if not re.fullmatch(r"\d{1,2}:\d{2}", toi):
+            toi = "-"
+        line = f"{name} — {toi} | {g} G, {a} A, {pts} P"
+        hits = _int_or_none(r.get("HITS"))
+        if hits is not None:
+            line += f" | {hits} hits"
         lines.append(line)
-    return "\n".join(lines)
+    return lines
+
+
+def _goalie_lines(rows: list[dict[str, str]]) -> list[str]:
+    """One labeled line per goalie: 'J. Daccord — 37 shots, .857 SV%, 3 GA'."""
+    lines: list[str] = []
+    for r in rows:
+        name = r.get("PLAYER", "").strip().replace(",", ".")
+        if not _plausible_name(name):
+            continue
+        stats: list[str] = []
+        sa = _int_or_none(r.get("SA"))
+        if sa is not None:
+            stats.append(f"{sa} shots")
+        sv = (r.get("SV%") or "").strip()
+        if re.fullmatch(r"[01]?\.\d{2,3}", sv):
+            stats.append(f"{sv} SV%")
+        ga = _int_or_none(r.get("GA"))
+        if ga is not None:
+            stats.append(f"{ga} GA")
+        if not stats:
+            continue
+        lines.append(f"{name} — {', '.join(stats)}")
+    return lines
 
 
 def format_description(
@@ -690,7 +738,11 @@ def format_description(
                 continue
             emoji = _RANK_STARS.get(rank, "⭐")
             name_part = star.player_name or "(unknown)"
-            stars_lines.append(f"{emoji} {name_part}")
+            line = f"{emoji} {name_part}"
+            stats = _star_stats_compact(getattr(star, "player_stats", ""))
+            if stats:
+                line += f" — {stats}"
+            stars_lines.append(line)
         if stars_lines:
             parts += [""] + stars_lines
 
@@ -709,20 +761,18 @@ def format_description(
     for team in teams_seen:
         tabs = by_team[team]
         # Skaters first, then Goalies
-        for tab_key, col_names, label in [
-            ("ALL SKATERS", _DESC_SKATER_COLS, "Skaters"),
-            ("GOALIES",     _DESC_GOALIE_COLS, "Goalies"),
+        for tab_key, formatter, label in [
+            ("ALL SKATERS", _skater_lines, "Skaters"),
+            ("GOALIES",     _goalie_lines, "Goalies"),
         ]:
             screen = tabs.get(tab_key)
             if screen is None:
                 continue
-            # Filter out rows that are fully empty
-            real_rows = [
-                r for r in screen.rows
-                if any(v and v != "-" for v in r.values())
-            ]
+            lines = formatter(screen.rows)
+            if not lines:
+                continue
             parts.append(f"\n{team} {label}:")
-            parts.append("```\n" + _format_table_text(real_rows, col_names) + "\n```")
+            parts.append("\n".join(lines))
 
     parts += ["", disclaimer]
     return "\n".join(parts)
