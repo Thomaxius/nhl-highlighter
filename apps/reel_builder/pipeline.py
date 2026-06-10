@@ -1027,6 +1027,21 @@ def run_pipeline(
     # Attach rough timing from filename index (real app would parse FFmpeg metadata)
     results = score_segments_by_audio(results, all_spikes)
 
+    # ── Steps 7 + 7b (background): Stats + Star screen scans ─────────────────
+    # Both scans only read the normalised clips — they don't depend on the
+    # reel — and Step 6 spends nearly all its time waiting on FFmpeg
+    # subprocesses, so the OCR work runs concurrently with the reel build.
+    # Results are collected (and logged/saved) after build_reel returns.
+    from concurrent.futures import ThreadPoolExecutor as _StatsPool
+    logger.info("━━━  Steps 7 + 7b: Stats + Star screen scans (background)  ━━━")
+    _stats_pool = _StatsPool(max_workers=2)
+    _stats_future = _stats_pool.submit(
+        lambda: [detect_stats_screens(clip) for clip in normalised]
+    )
+    _stars_future = _stats_pool.submit(
+        lambda: [(clip, detect_star_screens(clip)) for clip in normalised]
+    )
+
     # ── Step 6: Assemble reel ────────────────────────────────────────────────
     logger.info("━━━  Step 6: Building reel  ━━━")
     _pt_dir = Path("apps/reel_builder/assets/period_transitions")
@@ -1067,8 +1082,7 @@ def run_pipeline(
     # Per-video stats folder: exports/{reel_stem}/stats/
     stats_out_dir = output_path.with_suffix("") / "stats"
     all_stats: list = []
-    for clip in normalised:
-        screens = detect_stats_screens(clip)
+    for screens in _stats_future.result():
         if screens:
             saved = save_stats_csv(screens, stats_out_dir)
             all_stats.extend(screens)
@@ -1094,8 +1108,7 @@ def run_pipeline(
 
     logger.info("━━━  Step 7b: Star screen detection  ━━━")
     all_stars: list = []
-    for clip in normalised:
-        stars = detect_star_screens(clip)
+    for clip, stars in _stars_future.result():
         if stars:
             all_stars.extend(stars)
             for star in stars:
@@ -1108,6 +1121,7 @@ def run_pipeline(
                 )
         else:
             logger.info("  No star screens found in %s", clip.name)
+    _stats_pool.shutdown()
 
     # Save the YouTube description (title substituted by the uploader)
     description_path = output_path.with_suffix(".txt")
