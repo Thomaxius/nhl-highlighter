@@ -56,7 +56,9 @@ logger = logging.getLogger(__name__)
 # ── Scan parameters ────────────────────────────────────────────────────────────
 SCAN_FROM_END_S: float = 300.0
 SCAN_FPS:        float = 2.0     # Phase 1
-STAR_THRESHOLD:  float = 0.95
+STAR_THRESHOLD:  float = 0.85   # banner-match gate; lowered from 0.95 so star
+                                # cards still pass on HDR sources that read a bit
+                                # off against the SDR templates (~0.90 there)
 
 # ── Regions ────────────────────────────────────────────────────────────────────
 BANNER_Y0, BANNER_Y1 = 230, 320
@@ -279,23 +281,33 @@ def _ocr_score_line(frame: np.ndarray) -> str:
 
 def _load_templates(
     configs_dir: Path,
-) -> tuple[dict[str, np.ndarray], np.ndarray | None]:
-    templates: dict[str, np.ndarray] = {}
-    for rank, fname in [
-        ("FIRST",  "star_first_star_template.png"),
-        ("SECOND", "star_second_star_template.png"),
-        ("THIRD",  "star_third_star_template.png"),
+) -> tuple[dict[str, list[np.ndarray]], np.ndarray | None]:
+    """Load star-card banner templates, allowing multiple per rank.
+
+    Any file matching ``star_<rank>_star_template*.png`` is used, so extra
+    variants (e.g. star_first_star_template2.png) can be dropped in and the
+    best match across them wins. Note: variants should be cut from SDR
+    (tone-mapped) footage to match what the pipeline feeds the detector.
+    """
+    templates: dict[str, list[np.ndarray]] = {}
+    for rank, stem in [
+        ("FIRST",  "star_first_star_template"),
+        ("SECOND", "star_second_star_template"),
+        ("THIRD",  "star_third_star_template"),
     ]:
-        p = configs_dir / fname
-        if p.exists():
+        imgs: list[np.ndarray] = []
+        for p in sorted(configs_dir.glob(f"{stem}*.png")):
             img = cv2.imread(str(p))
             if img is not None:
-                templates[rank] = img
-                logger.debug("Loaded %s (%dx%d)", fname, img.shape[1], img.shape[0])
+                imgs.append(img)
+                logger.debug("Loaded %s (%dx%d)", p.name, img.shape[1], img.shape[0])
             else:
                 logger.warning("Cannot read template: %s", p)
+        if imgs:
+            templates[rank] = imgs
+            logger.debug("%s: %d template(s)", rank, len(imgs))
         else:
-            logger.warning("Template not found: %s", p)
+            logger.warning("No templates found for %s (%s*.png)", rank, stem)
 
     label_p = configs_dir / "star_stats_label_template.png"
     stats_label_tmpl: np.ndarray | None = None
@@ -477,8 +489,8 @@ def detect_star_screens(
         if not ok:
             break
         ts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-        for rank, tmpl in templates.items():
-            score = _match_banner(frame, tmpl)
+        for rank, tmpls in templates.items():
+            score = max(_match_banner(frame, t) for t in tmpls)
             if score > peak_by_rank.get(rank, (0, 0.0))[1]:
                 peak_by_rank[rank] = (ts, score)
 

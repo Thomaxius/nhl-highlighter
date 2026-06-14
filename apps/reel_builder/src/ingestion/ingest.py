@@ -46,8 +46,18 @@ def ingest_clips(
     processed: list[Path] = []
     for clip in clips:
         # If the file is already normalised (stem ends with _norm), skip re-encoding
-        # and treat it as the output directly.
+        # and treat it as the output directly — UNLESS it's still HDR, in which
+        # case "_norm" is a misnomer (the detectors need SDR) and we tone-map it.
         if clip.stem.endswith("_norm"):
+            if _is_hdr(clip):
+                out_path = output_dir / (clip.stem + "_sdr.mp4")
+                logger.info("'%s' is tagged _norm but is HDR — tone-mapping to SDR: %s",
+                            clip.name, out_path.name)
+                if out_path.exists() and out_path.stat().st_size > 10_000 and not overwrite:
+                    processed.append(out_path)
+                elif _ffmpeg_normalise(clip, out_path):
+                    processed.append(out_path)
+                continue
             logger.info("Already normalised, using as-is: %s", clip.name)
             processed.append(clip)
             continue
@@ -70,15 +80,55 @@ def ingest_clips(
     return processed
 
 
+def _is_hdr(src: Path) -> bool:
+    """True if the source uses an HDR transfer function (PQ or HLG).
+
+    PS5 captures are often 10-bit HDR (smpte2084/bt2020); YouTube downloads are
+    8-bit SDR (bt709). The detectors and OCR are calibrated on SDR, so HDR must
+    be tone-mapped during normalisation — see _ffmpeg_normalise.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+            capture_output=True, text=True,
+        ).stdout.strip().lower()
+    except Exception:
+        return False
+    return out in {"smpte2084", "arib-std-b67"}
+
+
 def _ffmpeg_normalise(src: Path, dst: Path) -> bool:
-    """Run FFmpeg to normalise a single clip."""
+    """Run FFmpeg to normalise a single clip to 1080p30 8-bit SDR (bt709)."""
+    base_vf = (
+        f"scale=1920:1080:force_original_aspect_ratio=decrease,"
+        f"pad=1920:1080:-1:-1:color=black,fps={TARGET_FPS}"
+    )
+    out_color: list[str] = []
+    if _is_hdr(src):
+        # Tone-map HDR (PQ/HLG, bt2020) → SDR bt709 so the colour/brightness-
+        # calibrated detectors (banner, stars, stats OCR) see what they expect.
+        # Needs ffmpeg built with zscale (libzimg).
+        logger.info("HDR source detected — tone-mapping to SDR bt709: %s", src.name)
+        tonemap = (
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+            "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+        )
+        vf = f"{tonemap},{base_vf}"
+        out_color = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+    else:
+        vf = base_vf
+
     cmd = [
         "ffmpeg", "-y",
         "-i", str(src),
-        "-vf", f"scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1:color=black,fps={TARGET_FPS}",
+        "-vf", vf,
         "-c:v", TARGET_CODEC,
         "-preset", "fast",
         "-crf", "18",
+        "-pix_fmt", "yuv420p",          # force 8-bit output (no-op for 8-bit SDR input)
+        *out_color,
         "-c:a", TARGET_AUDIO_CODEC,
         "-ar", str(TARGET_AUDIO_RATE),
         "-movflags", "+faststart",
