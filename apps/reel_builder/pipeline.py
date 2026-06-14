@@ -17,6 +17,7 @@ The pipeline runs:
 import argparse
 import datetime
 import logging
+import time
 from pathlib import Path
 
 import yaml
@@ -36,6 +37,7 @@ from src.detection.pause_menu_detector import PauseMenuDetector
 from src.detection.stats_detector import detect_stats_screens, save_stats_csv, format_description
 from src.detection.star_detector import detect_star_screens, StarScreen as StarScreenResult
 from src.assembly.reel_builder import build_reel
+from src.progress import ETAReporter, format_duration
 
 logging.basicConfig(
     level=logging.INFO,
@@ -406,6 +408,10 @@ def run_pipeline(
     segments_dir = Path("apps/shared/data/processed/segments")
     audio_dir = Path("apps/shared/data/processed/audio")
 
+    # Console-only ETA (learned from past run logs) + overall timer.
+    _run_start = time.time()
+    _eta = ETAReporter.attach()
+
     # ── Step 1: Ingest & normalise ───────────────────────────────────────────
     logger.info("━━━  Step 1: Ingesting clips  ━━━")
     normalised = ingest_clips(input_dir, processed_dir)
@@ -423,6 +429,8 @@ def run_pipeline(
         )
         all_segments.extend(segs)
     logger.info("Total segments: %d", len(all_segments))
+    # Refine the ETA now that the segment count is known (classify time scales with it).
+    _eta.set_segment_count(len(all_segments))
 
     # ── Step 3: Audio analysis ───────────────────────────────────────────────
     logger.info("━━━  Step 3: Audio analysis  ━━━")
@@ -1031,15 +1039,16 @@ def run_pipeline(
     # Attach rough timing from filename index (real app would parse FFmpeg metadata)
     results = score_segments_by_audio(results, all_spikes)
 
-    # ── Steps 7 + 7b (background): Stats + Star screen scans ─────────────────
-    # Both scans only read the normalised clips — they don't depend on the
-    # reel — and Step 6 spends nearly all its time waiting on FFmpeg
-    # subprocesses, so the OCR work runs concurrently with the reel build.
-    # Results are collected (and logged/saved) after build_reel returns.
-    # max_workers=1: the two scans run sequentially but still fully overlap
-    # the reel build, while holding only one extra video decoder in memory.
+    # ── Step 6 (+7/7b): Reel build with concurrent stats + star scan ─────────
+    # The stats + Three-Stars OCR scans only read the normalised clips, and the
+    # reel build spends nearly all its time waiting on FFmpeg subprocesses, so
+    # the scans run in a background thread concurrently with the build. They
+    # overlap into a single wall-clock block, so one combined header is logged
+    # here; results are collected (and logged/saved) after build_reel returns.
+    # max_workers=1: the two scans run sequentially but still fully overlap the
+    # reel build, while holding only one extra video decoder in memory.
     from concurrent.futures import ThreadPoolExecutor as _StatsPool
-    logger.info("━━━  Steps 7 + 7b: Stats + Star screen scans (background)  ━━━")
+    logger.info("━━━  Step 6: Building reel + stats/star scan (concurrent)  ━━━")
     _stats_pool = _StatsPool(max_workers=1)
     _stats_future = _stats_pool.submit(
         lambda: [detect_stats_screens(clip) for clip in normalised]
@@ -1048,8 +1057,6 @@ def run_pipeline(
         lambda: [(clip, detect_star_screens(clip)) for clip in normalised]
     )
 
-    # ── Step 6: Assemble reel ────────────────────────────────────────────────
-    logger.info("━━━  Step 6: Building reel  ━━━")
     _pt_dir = Path("apps/reel_builder/assets/period_transitions")
 
     # Build the set of period numbers whose boundaries were confirmed by the
@@ -1084,7 +1091,7 @@ def run_pipeline(
     # Results are written as CSVs in a per-reel subfolder, the parsed tables
     # are logged in full, and a YouTube description file is saved alongside
     # the reel so the uploader can attach the stats to the video description.
-    logger.info("━━━  Step 7: Stats screen detection  ━━━")
+    logger.info("Collecting stats screen results…")
     # Per-video stats folder: exports/{reel_stem}/stats/
     stats_out_dir = output_path.with_suffix("") / "stats"
     all_stats: list = []
@@ -1112,7 +1119,7 @@ def run_pipeline(
     if not all_stats:
         logger.info("  No stats screens found.")
 
-    logger.info("━━━  Step 7b: Star screen detection  ━━━")
+    logger.info("Collecting star screen results…")
     all_stars: list = []
     for clip, stars in _stars_future.result():
         if stars:
@@ -1137,6 +1144,9 @@ def run_pipeline(
         logger.info("  Description template → %s", description_path)
     except Exception as _exc:
         logger.warning("  Could not write description file: %s", _exc)
+
+    logging.getLogger().removeHandler(_eta)
+    logger.info("Pipeline completed in %s", format_duration(time.time() - _run_start))
 
 
 def run_smoke_test(checkpoint: str) -> int:
