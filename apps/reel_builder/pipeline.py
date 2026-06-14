@@ -148,10 +148,30 @@ def _chain_goal_sequences(
                 accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
 
             else:
-                # other, faceoff, or anything else — treat as a gap
+                # other, faceoff, or anything else.
                 duration = _get_clip_duration(seg["path"])
                 if duration <= 3.0:
                     logger.info("  Skipping short transition (%.1fs): %s", duration, Path(seg["path"]).name)
+                    continue
+                # Before the celebration/replay run begins, an in-game `other`
+                # segment here is the on-ice reaction right after the goal — the
+                # goal moment often lands at the very end of the goal scene, so
+                # this is the "few seconds after the goal" before the cutscene.
+                # The classifier usually tags it `other`, which previously got
+                # dropped and caused a hard cut from goal → celebration. Bridge
+                # it into the sequence instead, bounded by MAX_GAP_S so a long
+                # stoppage can't balloon the clip.
+                if not replay_started and accumulated_gap_s + duration <= MAX_GAP_S:
+                    seg["chain_order"] = order
+                    seg["chain_goal_idx"] = goal_idx
+                    seg["score"] = base_score - (order * 0.01)
+                    seg["confidence"] = max(seg.get("confidence", 0.0), 0.9)
+                    logger.info(
+                        "  Bridged in-game footage (order %d, goal %d): %s",
+                        order, goal_idx, Path(seg["path"]).name,
+                    )
+                    order += 1
+                    accumulated_gap_s += duration
                     continue
                 accumulated_gap_s += duration
                 if accumulated_gap_s > MAX_GAP_S:
