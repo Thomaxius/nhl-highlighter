@@ -46,6 +46,10 @@ OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECS", "900"))
 MIN_DURATION = int(os.environ.get("MIN_VIDEO_DURATION_SECS", "1800"))
 UPLOAD_PRIVACY = os.environ.get("UPLOAD_PRIVACY", "unlisted")
+# Video files dropped directly into RAW_DIR are processed like YouTube uploads.
+LOCAL_VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+# Ignore files whose mtime changed within this window — they may still be copying.
+LOCAL_SETTLE_SECONDS = int(os.environ.get("LOCAL_SETTLE_SECS", "30"))
 UPLOAD_DESCRIPTION_TEMPLATE = (
     "{title}\n\n"
     "This highlight reel was automatically generated with NHL Highlighter:\n"
@@ -132,7 +136,7 @@ def get_uploads_playlist_id(service) -> str:
     return items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
 
-def get_latest_videos(service, playlist_id: str, max_results: int = 10) -> list[dict]:
+def get_latest_videos(service, playlist_id: str, max_results: int = 50) -> list[dict]:
     resp = service.playlistItems().list(
         part="snippet",
         playlistId=playlist_id,
@@ -252,22 +256,37 @@ def upload_highlight(video_file: Path, title: str) -> str | None:
 
 # ── Main processing loop ──────────────────────────────────────────────────────
 
-def process_video(video_id: str, title: str, state: dict):
+def process_video(video_id: str, title: str, state: dict, local_input: Path | None = None):
+    """Process one video end-to-end. ``local_input`` is a file already on disk
+    (dropped into RAW_DIR); when given, the download step is skipped and the
+    file is used as the pipeline input directly."""
     raw_video_dir = RAW_DIR / video_id
     output_file = EXPORTS_DIR / f"{video_id}_highlights.mp4"
     processed_dir = APP_DIR / "apps" / "shared" / "data" / "processed"
 
     logger.info("=== Processing: %s  (%s) ===", title, video_id)
-    state["processed"][video_id] = {"status": "downloading", "title": title}
+    state["processed"][video_id] = {
+        "status": "processing" if local_input else "downloading",
+        "title": title,
+    }
+    if local_input is not None:
+        state["processed"][video_id]["local_source"] = str(local_input)
     save_state(state)
 
     try:
         # Check for an already-normalised file first — if present we can skip
-        # both the download and the FFmpeg re-encode entirely.
-        norm_candidates = list(processed_dir.glob(f"{video_id}*_norm.mp4")) if processed_dir.exists() else []
+        # both the download and the FFmpeg re-encode entirely. The pipeline
+        # names normalised files after the input stem (the video_id for
+        # downloads, the filename stem for local files).
+        norm_stem = local_input.stem if local_input is not None else video_id
+        norm_candidates = list(processed_dir.glob(f"{norm_stem}*_norm.mp4")) if processed_dir.exists() else []
         if norm_candidates:
             pipeline_input = norm_candidates[0]
             logger.info("Normalised file already present, skipping download + re-encode: %s", pipeline_input.name)
+        elif local_input is not None:
+            # Local file: use it directly, never download.
+            pipeline_input = local_input
+            logger.info("Processing local file (no download): %s", pipeline_input)
         else:
             # Fall back to checking for the raw downloaded file.
             existing_raw = (
@@ -313,6 +332,14 @@ def process_video(video_id: str, title: str, state: dict):
             if raw_video_dir.exists():
                 shutil.rmtree(raw_video_dir)
                 logger.info("Deleted raw dir: %s", raw_video_dir)
+            # A local source isn't re-downloadable, so move (don't delete) it out
+            # of the scan path so it isn't picked up again on the next poll.
+            if local_input is not None and local_input.exists():
+                archive_dir = RAW_DIR / "processed_local"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / local_input.name
+                local_input.replace(dest)
+                logger.info("Archived processed local file → %s", dest)
             if output_file.exists():
                 output_file.unlink()
                 logger.info("Deleted export: %s", output_file)
@@ -326,6 +353,51 @@ def process_video(video_id: str, title: str, state: dict):
         state["processed"][video_id]["status"] = "error"
         state["processed"][video_id]["error"] = str(exc)
         save_state(state)
+
+
+def local_video_id(path: Path) -> str:
+    """Stable synthetic id for a local file, tracked in the same state file as
+    YouTube ids so each local file is processed once."""
+    return "local-" + re.sub(r"[^A-Za-z0-9_-]+", "_", path.stem)
+
+
+def scan_local_files() -> list[Path]:
+    """Video files dropped directly into RAW_DIR for local processing.
+
+    Per-video download subdirectories (RAW_DIR/<video_id>/) and the
+    processed_local archive are skipped — only top-level files are returned.
+    Files modified within the settle window are skipped (may still be copying).
+    """
+    if not RAW_DIR.exists():
+        return []
+    now = time.time()
+    files: list[Path] = []
+    for p in sorted(RAW_DIR.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in LOCAL_VIDEO_EXTS:
+            continue
+        if now - p.stat().st_mtime < LOCAL_SETTLE_SECONDS:
+            logger.info("Local file still settling, will retry next poll: %s", p.name)
+            continue
+        files.append(p)
+    return files
+
+
+def process_due_local_files(state: dict):
+    """Process any local video files in RAW_DIR the same way as YouTube uploads.
+
+    Unlike downloaded videos these have no duration metadata, so the
+    MIN_DURATION gate is skipped — the file was placed there deliberately.
+    """
+    for path in scan_local_files():
+        video_id = local_video_id(path)
+        if video_id in state.get("uploaded_reels", []):
+            continue
+        status = state["processed"].get(video_id, {}).get("status")
+        if status in ("done", "uploading", "processing", "downloading"):
+            continue
+        if status == "error":
+            logger.info("Retrying errored local file: %s (%s)", path.name, video_id)
+        process_video(video_id, path.stem, state, local_input=path)
 
 
 def main():
@@ -385,6 +457,9 @@ def main():
                     continue
 
                 process_video(video_id, video["title"], state)
+
+            # Also process any local files dropped into RAW_DIR.
+            process_due_local_files(state)
 
         except Exception as exc:
             logger.error("Watcher poll error: %s", exc, exc_info=True)
