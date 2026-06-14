@@ -256,6 +256,97 @@ def upload_highlight(video_file: Path, title: str) -> str | None:
 
 # ── Main processing loop ──────────────────────────────────────────────────────
 
+def _cleanup_after_success(video_id: str, output_file: Path, local_input: Path | None):
+    """Delete large transient files after a reel has been uploaded.
+    Segments in processed/ are kept for model training."""
+    raw_video_dir = RAW_DIR / video_id
+    try:
+        import shutil
+        if raw_video_dir.exists():
+            shutil.rmtree(raw_video_dir)
+            logger.info("Deleted raw dir: %s", raw_video_dir)
+        # A local source isn't re-downloadable, so move (don't delete) it out
+        # of the scan path so it isn't picked up again on the next poll.
+        if local_input is not None and local_input.exists():
+            archive_dir = RAW_DIR / "processed_local"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            dest = archive_dir / local_input.name
+            local_input.replace(dest)
+            logger.info("Archived processed local file → %s", dest)
+        if output_file.exists():
+            output_file.unlink()
+            logger.info("Deleted export: %s", output_file)
+    except Exception as cleanup_exc:
+        logger.warning("Cleanup failed (non-fatal): %s", cleanup_exc)
+
+
+def finalize_upload(video_id: str, title: str, output_file: Path, state: dict,
+                    local_input: Path | None = None):
+    """Upload a finished reel and finalize state.
+
+    On upload failure the entry is marked 'upload_failed' (not 'error') and the
+    reel + description are left on disk, with their paths recorded in the state
+    file, so retry_upload() can re-attempt just the upload next poll instead of
+    re-running the whole pipeline.
+    """
+    entry = state["processed"][video_id]
+    entry["status"] = "uploading"
+    # Persist what a retry needs to find the artifacts again.
+    entry["reel_path"] = str(output_file)
+    desc_path = output_file.with_suffix(".txt")
+    if desc_path.exists():
+        entry["description_path"] = str(desc_path)
+    save_state(state)
+
+    try:
+        logger.info("Uploading: %s", title)
+        reel_video_id = upload_highlight(output_file, title)
+        logger.info("Upload done.")
+    except Exception as exc:
+        logger.error("Upload failed for %s: %s — will retry next poll", video_id, exc)
+        entry["status"] = "upload_failed"
+        entry["error"] = str(exc)
+        save_state(state)
+        return
+
+    entry["status"] = "done"
+    entry.pop("error", None)
+    if reel_video_id:
+        # Track the uploaded reel's video ID so the poller skips it on
+        # future polls instead of treating it as a new video to process.
+        uploaded = state.setdefault("uploaded_reels", [])
+        if reel_video_id not in uploaded:
+            uploaded.append(reel_video_id)
+        logger.info("Reel uploaded as https://youtube.com/watch?v=%s", reel_video_id)
+    save_state(state)
+
+    _cleanup_after_success(video_id, output_file, local_input)
+    logger.info("=== Done: %s ===", video_id)
+
+
+def retry_upload(video_id: str, state: dict):
+    """Re-attempt only the upload for a reel whose pipeline already succeeded
+    (status 'upload_failed'), using the artifact paths saved in the state file."""
+    entry = state["processed"].get(video_id, {})
+    reel_path = entry.get("reel_path")
+    title = entry.get("title", video_id)
+
+    if not reel_path or not Path(reel_path).exists():
+        # Artifact is gone — fall back to a full reprocess.
+        logger.warning(
+            "Cannot retry upload for %s — reel file missing (%s); will reprocess from scratch",
+            video_id, reel_path,
+        )
+        entry["status"] = "error"
+        save_state(state)
+        return
+
+    local_source = entry.get("local_source")
+    local_input = Path(local_source) if local_source and Path(local_source).exists() else None
+    logger.info("Retrying upload for %s: %s", video_id, reel_path)
+    finalize_upload(video_id, title, Path(reel_path), state, local_input)
+
+
 def process_video(video_id: str, title: str, state: dict, local_input: Path | None = None):
     """Process one video end-to-end. ``local_input`` is a file already on disk
     (dropped into RAW_DIR); when given, the download step is skipped and the
@@ -308,45 +399,10 @@ def process_video(video_id: str, title: str, state: dict, local_input: Path | No
         run_pipeline(pipeline_input, output_file)
         logger.info("Pipeline finished: %s", output_file)
 
-        state["processed"][video_id]["status"] = "uploading"
-        save_state(state)
-
-        logger.info("Uploading: %s", title)
-        reel_video_id = upload_highlight(output_file, title)
-        logger.info("Upload done.")
-
-        state["processed"][video_id]["status"] = "done"
-        if reel_video_id:
-            # Track the uploaded reel's video ID so the poller skips it on
-            # future polls instead of treating it as a new video to process.
-            uploaded = state.setdefault("uploaded_reels", [])
-            if reel_video_id not in uploaded:
-                uploaded.append(reel_video_id)
-            logger.info("Reel uploaded as https://youtube.com/watch?v=%s", reel_video_id)
-        save_state(state)
-
-        # Clean up large files now that the reel is uploaded.
-        # Segments in processed/ are kept for model training.
-        try:
-            import shutil
-            if raw_video_dir.exists():
-                shutil.rmtree(raw_video_dir)
-                logger.info("Deleted raw dir: %s", raw_video_dir)
-            # A local source isn't re-downloadable, so move (don't delete) it out
-            # of the scan path so it isn't picked up again on the next poll.
-            if local_input is not None and local_input.exists():
-                archive_dir = RAW_DIR / "processed_local"
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                dest = archive_dir / local_input.name
-                local_input.replace(dest)
-                logger.info("Archived processed local file → %s", dest)
-            if output_file.exists():
-                output_file.unlink()
-                logger.info("Deleted export: %s", output_file)
-        except Exception as cleanup_exc:
-            logger.warning("Cleanup failed (non-fatal): %s", cleanup_exc)
-
-        logger.info("=== Done: %s ===", video_id)
+        # The reel is built. Upload + cleanup is handled separately so that an
+        # upload failure (e.g. expired token) is retried as an upload-only step
+        # next poll, without re-running the whole pipeline.
+        finalize_upload(video_id, title, output_file, state, local_input)
 
     except Exception as exc:
         logger.error("Failed processing %s: %s", video_id, exc, exc_info=True)
@@ -395,6 +451,9 @@ def process_due_local_files(state: dict):
         status = state["processed"].get(video_id, {}).get("status")
         if status in ("done", "uploading", "processing", "downloading"):
             continue
+        if status == "upload_failed":
+            retry_upload(video_id, state)
+            continue
         if status == "error":
             logger.info("Retrying errored local file: %s (%s)", path.name, video_id)
         process_video(video_id, path.stem, state, local_input=path)
@@ -429,6 +488,10 @@ def main():
                 existing_status = existing.get("status")
 
                 if existing_status in ("done", "uploading", "processing", "downloading", "skipped_short"):
+                    continue
+                # Pipeline already succeeded — retry just the upload.
+                if existing_status == "upload_failed":
+                    retry_upload(video_id, state)
                     continue
                 # Retry errored videos on the next cycle
                 if existing_status == "error":
