@@ -349,14 +349,38 @@ def _match_banner(frame: np.ndarray, template: np.ndarray) -> float:
 def _stats_animation_done(
     frame: np.ndarray, label_tmpl: np.ndarray | None
 ) -> bool:
-    if label_tmpl is None:
-        return True
+    """Return True when the stats label row and digit strip are both fully rendered.
+
+    Primary gate: template match against the label template (works on dark/teal
+    cards).  Fallback: brightness-based heuristic that works on any team-colour
+    card (e.g. orange Oilers card).  The heuristic checks two conditions:
+
+      1. Label row (y=475-497) has non-trivial std-dev, meaning text is present.
+      2. Stats digit strip (y=505-560) has a bright pixel (max of min-channel
+         > 140), meaning at least one digit has fully faded in.
+
+    Using the min-channel (per-pixel min of R,G,B) isolates near-white/gray
+    text from any saturated background (orange, teal, …).
+    """
     region = frame[STATS_LABEL_Y0:STATS_LABEL_Y1, STATS_LABEL_X0:STATS_LABEL_X1]
-    th, tw = label_tmpl.shape[:2]
-    if region.shape[0] < th or region.shape[1] < tw:
+
+    # Primary: template match (dark/teal cards)
+    if label_tmpl is not None:
+        th, tw = label_tmpl.shape[:2]
+        if region.shape[0] >= th and region.shape[1] >= tw:
+            score = float(cv2.matchTemplate(region, label_tmpl, cv2.TM_CCOEFF_NORMED).max())
+            if score >= STATS_LABEL_THRESHOLD:
+                return True
+
+    # Fallback: brightness heuristic for team-coloured cards
+    # Label row must show visible text (std > 10 in the min channel)
+    label_min = region.min(axis=2)
+    if label_min.std() < 10:
         return False
-    score = float(cv2.matchTemplate(region, label_tmpl, cv2.TM_CCOEFF_NORMED).max())
-    return score >= STATS_LABEL_THRESHOLD
+    # Digit strip must have at least one bright pixel (animation complete)
+    digit_strip = frame[STATS_Y0:STATS_Y1, STATS_X0:STATS_X1]
+    digit_min = digit_strip.min(axis=2)
+    return int(digit_min.max()) > 140
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +444,11 @@ def _ocr_around_peak(
             break
         if not _stats_animation_done(frame, stats_label_tmpl):
             continue
-        r = frame[STATS_Y0:STATS_Y1, STATS_X0:STATS_X1][:, :, 2]
+        # Use per-pixel min(R,G,B) channel: isolates near-white/gray digits
+        # from any team-colour background (orange, teal, dark, …).
+        # On a dark/teal card min≈R≈G≈B for white text; on an orange card
+        # the background has low B so min(R,G,B)≈B while digits remain bright.
+        r = frame[STATS_Y0:STATS_Y1, STATS_X0:STATS_X1].min(axis=2).astype(np.uint8)
         _ocr_stats_votes(r, pos_votes)
         if not got_score_l:
             best_score_l = _ocr_score_line(frame)
