@@ -64,7 +64,8 @@ STAR_THRESHOLD:  float = 0.85   # banner-match gate; lowered from 0.95 so star
 BANNER_Y0, BANNER_Y1 = 230, 320
 BANNER_X0, BANNER_X1 = 0, 960      # left 960 px — the star card panel; the score HUD is centre/right
 
-NAME_X0,   NAME_X1  = 90,  310   # X1 wide enough that long surnames ('Tkachuk') don't clip
+NAME_X0,   NAME_X1  = 90,  400   # X1 wide enough for long surnames ('Voronkov'); trailing
+                                 # card background is harmless (thresholds to black)
 NAME_Y0,   NAME_Y1  = 635, 740
 NAME_MID_Y           = 688
 
@@ -103,11 +104,26 @@ class StarScreen:
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
 
 
-def _ocr_first_name(frame: np.ndarray) -> str:
+def _name_channel(crop: np.ndarray, mode: str) -> np.ndarray:
+    """Single-channel image for name OCR.
+
+    'red'  — the red channel; high contrast for light text on the dark/teal
+             cards (e.g. the default home card).
+    'min'  — per-pixel min(R,G,B); isolates near-white text on ANY team-coloured
+             card. White text is high in all channels, while any saturated
+             background (orange, red, …) has at least one low channel, so the
+             min separates text from background regardless of hue.
+    """
+    if mode == "min":
+        return crop.min(axis=2).astype(np.uint8)
+    return crop[:, :, 2]
+
+
+def _ocr_first_name(frame: np.ndarray, mode: str = "red") -> str:
     if not _TESS_AVAILABLE:
         return ""
     crop = frame[NAME_Y0:NAME_MID_Y, NAME_X0:NAME_X1]
-    r = crop[:, :, 2]
+    r = _name_channel(crop, mode)
     r_c = _clahe.apply(r)
     big = cv2.resize(r_c, (r_c.shape[1] * 4, r_c.shape[0] * 4),
                      interpolation=cv2.INTER_CUBIC)
@@ -123,11 +139,11 @@ def _ocr_first_name(frame: np.ndarray) -> str:
     return max(words, key=lambda w: (w[:1].isupper() and w[1:].islower(), len(w)))
 
 
-def _ocr_last_name(frame: np.ndarray) -> str:
+def _ocr_last_name(frame: np.ndarray, mode: str = "red") -> str:
     if not _TESS_AVAILABLE:
         return ""
     crop = frame[NAME_Y0:NAME_Y1, NAME_X0:NAME_X1]
-    r = crop[:, :, 2]
+    r = _name_channel(crop, mode)
     thresh_val = int(np.percentile(r, 85))
     big = cv2.resize(r, (r.shape[1] * 4, r.shape[0] * 4),
                      interpolation=cv2.INTER_CUBIC)
@@ -412,10 +428,14 @@ def _ocr_around_peak(
 
     stats_str = _votes_to_stats(pos_votes) if any(pos_votes) else ""
 
-    # ── Names: outward-step seeks ─────────────────────────────────────────────
-    steps = [0.0]
-    for d in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]:
-        steps += [-d, d]
+    # ── Names: forward-biased seeks × colour channels ────────────────────────
+    # The banner fires the instant the card appears, but the LAST name fades in
+    # over the next ~1 s — so earlier frames only ever have a partial last name.
+    # Sample forward-densely (with a couple of fallback look-backs) so the fully
+    # rendered name is captured; the length tiebreaker then prefers it.
+    # Each frame is read with both colour channels ('red' for dark/teal cards,
+    # 'min' for team-coloured cards) and all readings compete in one pool.
+    steps = [0.0, 0.3, 0.6, 0.9, 1.2, 1.5, 2.0, 2.5, -0.5, -1.0]
 
     def _title_score(name: str) -> int:
         """Count tokens that are properly title-cased (first upper, rest lower)."""
@@ -431,15 +451,17 @@ def _ocr_around_peak(
         ok, frame = cap.read()
         if not ok:
             continue
-        # No gate here — player name is visible before stats finish animating
-        first = _ocr_first_name(frame)
-        last  = _ocr_last_name(frame)
-        name  = _clean_name(f"{first} {last}".strip())
-        q     = _name_quality(name)
-        tc    = _title_score(name)
-        alpha_len = sum(c.isalpha() for c in name)
-        name_candidates.append((q, tc, alpha_len, name))
-        logger.debug("  name-seek t=%.2fs  q=%d  tc=%d  len=%d  name=%r", ts, q, tc, alpha_len, name)
+        # No gate here — player name is visible before stats finish animating.
+        for mode in ("red", "min"):
+            first = _ocr_first_name(frame, mode)
+            last  = _ocr_last_name(frame, mode)
+            name  = _clean_name(f"{first} {last}".strip())
+            q     = _name_quality(name)
+            tc    = _title_score(name)
+            alpha_len = sum(c.isalpha() for c in name)
+            name_candidates.append((q, tc, alpha_len, name))
+            logger.debug("  name-seek t=%.2fs [%s]  q=%d  tc=%d  len=%d  name=%r",
+                         ts, mode, q, tc, alpha_len, name)
 
     # Primary: quality; secondary: title-case tokens; tertiary: total alpha length.
     best_name = max(name_candidates, key=lambda x: (x[0], x[1], x[2]))[3] if name_candidates else ""
