@@ -514,6 +514,19 @@ def run_pipeline(
     normalised = ingest_clips(input_dir, processed_dir)
     logger.info("Normalised %d clips.", len(normalised))
 
+    # Total frame count of the normalised clip(s): drives the frame-rate-based
+    # ETA for frame-bound steps (e.g. scene detection) and is parsed back out of
+    # the logs to learn the typical processing fps.
+    import cv2 as _cv2_fc
+    _total_frames = 0
+    for _clip in normalised:
+        _cap = _cv2_fc.VideoCapture(str(_clip))
+        _total_frames += int(_cap.get(_cv2_fc.CAP_PROP_FRAME_COUNT))
+        _cap.release()
+    if _total_frames > 0:
+        logger.info("Clip frames: %d", _total_frames)
+        _eta.set_frame_count(_total_frames)
+
     # ── Step 2: Scene splitting ──────────────────────────────────────────────
     logger.info("━━━  Step 2: Splitting scenes  ━━━")
     all_segments: list[Path] = []

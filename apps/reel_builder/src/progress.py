@@ -51,11 +51,16 @@ _FINAL_LABEL = STEP_SEQUENCE[-1][1]
 # segment count of the current run (known after scene-splitting). "classify+scan"
 # is by far the largest stage and is dominated by per-segment ML inference.
 _PER_SEGMENT_STEPS = {"classify+scan"}
+# Steps whose duration scales with the video's FRAME count (they touch every
+# frame). For these we learn frames-per-second of processing and divide the
+# current clip's frame count by it. Scene detection is purely frame-bound.
+_FRAME_SCALED_STEPS = {"scenes"}
 # A run is considered finished if it logged either of these (old / new wording).
 _DONE_MARKERS = ("Pipeline completed in", "Done!")
 _MAX_LOGS = 40           # only learn from the most recent N runs
 _TS_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\b")
 _CLASSIFY_RE = re.compile(r"Classifying:.*scene-")
+_FRAMES_RE = re.compile(r"Clip frames:\s*(\d+)")
 
 
 def format_duration(seconds: float) -> str:
@@ -70,16 +75,18 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
-def _parse_log(path: str) -> tuple[list[tuple[str, float]], int, float | None, bool]:
-    """Return (events, n_segments, last_ts, completed) for one run.
+def _parse_log(path: str) -> tuple[list[tuple[str, float]], int, int, float | None, bool]:
+    """Return (events, n_segments, n_frames, last_ts, completed) for one run.
 
     events are step headers in order; n_segments is the number of classified
-    segments; last_ts is the final timestamp seen (used to size the last stage,
-    which has no following header); completed indicates the run reached the end.
-    Handles HH:MM:SS-only timestamps rolling over midnight.
+    segments; n_frames is the clip's frame count (0 if not logged); last_ts is
+    the final timestamp seen (used to size the last stage, which has no following
+    header); completed indicates the run reached the end. Handles HH:MM:SS-only
+    timestamps rolling over midnight.
     """
     events: list[tuple[str, float]] = []
     n_segments = 0
+    n_frames = 0
     last_ts: float | None = None
     completed = False
     prev: float | None = None
@@ -87,10 +94,14 @@ def _parse_log(path: str) -> tuple[list[tuple[str, float]], int, float | None, b
     try:
         lines = Path(path).read_text(errors="replace").splitlines()
     except OSError:
-        return events, 0, None, False
+        return events, 0, 0, None, False
     for line in lines:
         if _CLASSIFY_RE.search(line):
             n_segments += 1
+        if not n_frames:
+            fm = _FRAMES_RE.search(line)
+            if fm:
+                n_frames = int(fm.group(1))
         if any(mk in line for mk in _DONE_MARKERS):
             completed = True
         m = _TS_RE.match(line)
@@ -107,7 +118,7 @@ def _parse_log(path: str) -> tuple[list[tuple[str, float]], int, float | None, b
             if sub in line:
                 events.append((label, t))
                 break
-    return events, n_segments, last_ts, completed
+    return events, n_segments, n_frames, last_ts, completed
 
 
 def _resolve_logs_dir(logs_dir: Path | None) -> tuple[Path, Path | None]:
@@ -124,12 +135,13 @@ def _resolve_logs_dir(logs_dir: Path | None) -> tuple[Path, Path | None]:
 
 def estimate_step_durations(
     logs_dir: Path | None = None,
-) -> tuple[dict[str, float], dict[str, float], int]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], int]:
     """Learn per-step timings from recent runs.
 
-    Returns (durations, per_segment, n_runs):
+    Returns (durations, per_segment, fps, n_runs):
       - durations:   median seconds per step (flat cost)
       - per_segment: for _PER_SEGMENT_STEPS, median seconds *per segment*
+      - fps:         for _FRAME_SCALED_STEPS, median *frames processed per second*
       - n_runs:      number of runs that contributed
     """
     base, exclude = _resolve_logs_dir(logs_dir)
@@ -140,9 +152,10 @@ def estimate_step_durations(
 
     samples: dict[str, list[float]] = {label: [] for _, label in STEP_SEQUENCE}
     per_seg_samples: dict[str, list[float]] = {label: [] for label in _PER_SEGMENT_STEPS}
+    fps_samples: dict[str, list[float]] = {label: [] for label in _FRAME_SCALED_STEPS}
     n_runs = 0
     for fp in files:
-        events, n_segments, last_ts, completed = _parse_log(fp)
+        events, n_segments, n_frames, last_ts, completed = _parse_log(fp)
         if len(events) >= 2:
             n_runs += 1
         for i in range(len(events) - 1):
@@ -154,6 +167,8 @@ def estimate_step_durations(
             samples[label].append(d)
             if label in per_seg_samples and n_segments > 10:
                 per_seg_samples[label].append(d / n_segments)
+            if label in fps_samples and n_frames > 100 and d > 0:
+                fps_samples[label].append(n_frames / d)
         # The final stage has no following header — size it from its start to
         # the end of the run, but only for runs that actually finished (so a
         # run cancelled mid-stage doesn't contribute a truncated duration).
@@ -164,7 +179,8 @@ def estimate_step_durations(
 
     durations = {label: statistics.median(v) for label, v in samples.items() if v}
     per_segment = {label: statistics.median(v) for label, v in per_seg_samples.items() if v}
-    return durations, per_segment, n_runs
+    fps = {label: statistics.median(v) for label, v in fps_samples.items() if v}
+    return durations, per_segment, fps, n_runs
 
 
 class ETAReporter(logging.Handler):
@@ -175,17 +191,26 @@ class ETAReporter(logging.Handler):
     in the log file, which is owned by a separate FileHandler).
     """
 
-    def __init__(self, durations: dict[str, float], per_segment: dict[str, float] | None = None):
+    def __init__(self, durations: dict[str, float],
+                 per_segment: dict[str, float] | None = None,
+                 fps: dict[str, float] | None = None):
         super().__init__()
         self._durations = durations
         self._per_segment = per_segment or {}
+        self._fps = fps or {}
         self._labels = [label for _, label in STEP_SEQUENCE]
         self.segment_count: int | None = None
+        self.frame_count: int | None = None
         self.t0 = time.time()
+        self._prev_label: str | None = None
+        self._prev_start: float = self.t0
         self._color = sys.stdout.isatty()
 
     def _step_duration(self, label: str) -> float:
-        """Estimated seconds for one step — scaled by segment count where known."""
+        """Estimated seconds for one step — scaled by frame or segment count
+        where we have a rate and the count for this run."""
+        if label in self._fps and self.frame_count and self._fps[label] > 0:
+            return self.frame_count / self._fps[label]
         if label in self._per_segment and self.segment_count:
             return self._per_segment[label] * self.segment_count
         return self._durations.get(label, 0.0)
@@ -202,6 +227,10 @@ class ETAReporter(logging.Handler):
         """Refine estimates once the run's segment count is known (after Step 2)."""
         self.segment_count = n
 
+    def set_frame_count(self, n: int) -> None:
+        """Refine frame-scaled estimates once the clip's frame count is known."""
+        self.frame_count = n
+
     def _write(self, text: str) -> None:
         if self._color:
             text = f"\033[2m{text}\033[0m"
@@ -213,11 +242,18 @@ class ETAReporter(logging.Handler):
             msg = record.getMessage()
             for sub, label in STEP_SEQUENCE:
                 if sub in msg:
+                    now = time.time()
+                    # Report the achieved processing rate of the step that just
+                    # finished, when it's a frame-bound step and we know frames.
+                    if (self._prev_label in _FRAME_SCALED_STEPS and self.frame_count
+                            and now > self._prev_start):
+                        rate = self.frame_count / (now - self._prev_start)
+                        self._write(f"   ▶ {self._prev_label} ran at ~{rate:.0f} frames/s")
+                    self._prev_label, self._prev_start = label, now
                     if self.total > 0:
-                        elapsed = time.time() - self.t0
                         self._write(
                             f"   ⏳ ~{format_duration(self._remaining_from(label))} remaining"
-                            f"   (elapsed {format_duration(elapsed)})"
+                            f"   (elapsed {format_duration(now - self.t0)})"
                         )
                     return
         except Exception:        # a reporting glitch must never break the run
@@ -226,8 +262,8 @@ class ETAReporter(logging.Handler):
     @classmethod
     def attach(cls, logs_dir: Path | None = None) -> "ETAReporter":
         """Compute estimates from past logs, attach to root logger, announce total."""
-        durations, per_segment, n_runs = estimate_step_durations(logs_dir)
-        reporter = cls(durations, per_segment)
+        durations, per_segment, fps, n_runs = estimate_step_durations(logs_dir)
+        reporter = cls(durations, per_segment, fps)
         logging.getLogger().addHandler(reporter)
         if reporter.total > 0:
             reporter._write(
