@@ -1163,13 +1163,22 @@ def run_pipeline(
     # Build the set of period numbers whose boundaries were confirmed by the
     # clock detector.  Only transitions to confirmed periods are injected.
     confirmed_period_boundaries: set[int] = set()
+    _OT_HIGHLIGHT_LABELS = {"goal", "celebration", "goal_replay", "other_replay", "scoring_chance"}
     for _r in results:
         if _r.get("period_end"):
             confirmed_period_boundaries.add(_r.get("period_number", 1) + 1)
         if _r.get("period_start") or _r.get("game_start"):
             confirmed_period_boundaries.add(_r.get("period_number", 1))
-        if _r.get("regulation_end"):
-            confirmed_period_boundaries.add(4)
+        # Overtime (period 4+) is only real if an actual highlight was played in
+        # it. regulation_end alone just means the 3rd period ended — the game may
+        # be over, with only post-game menu/stats screens after it, in which case
+        # injecting the OT transition is wrong.
+        if (_r.get("period_number", 1) >= 4
+                and _r.get("label") in _OT_HIGHLIGHT_LABELS
+                and not _r.get("game_end")
+                and not _r.get("regulation_end")
+                and not _r.get("has_menu")):
+            confirmed_period_boundaries.add(_r.get("period_number", 1))
     if confirmed_period_boundaries:
         logger.info("  Confirmed period boundaries: %s", sorted(confirmed_period_boundaries))
     else:

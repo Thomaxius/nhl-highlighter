@@ -22,6 +22,10 @@ FADE_DURATION = 0.5
 # how the assembly stage behaved.
 MAX_REEL_DURATION_S = 15 * 60
 
+# Cap on the game-end clip when it carries no explicit end-trim, so it can't run
+# to end-of-file and pull in post-game menu / stats / Three-Stars browsing.
+GAME_END_MAX_S = 30.0
+
 
 def build_reel(
     segments: list[dict],
@@ -305,17 +309,19 @@ def build_reel(
                     base = Path(lead["path"]).resolve()
                 trim_start = lead.get("game_end_trim_start_s", 0.0)
                 trim_end   = lead.get("game_end_trim_end_s")
+                # Cap the clip so it can't run to end-of-file (which would swallow
+                # the post-game menu / stats / Three-Stars browsing). A game-end
+                # clip should be the final moments + scoreboard, ~25s.
+                if trim_end is None:
+                    trim_end = trim_start + GAME_END_MAX_S
                 logger.info(
                     "game_end clip: %d segment(s), trim=[%.1fs, %.1fs] (lead=%s)",
-                    len(group), trim_start, trim_end if trim_end is not None else -1,
+                    len(group), trim_start, trim_end,
                     Path(lead["path"]).name,
                 )
-                if trim_end is not None:
-                    trimmed_ge = tmp / f"group_{group_idx:03d}_gameend.mp4"
-                    _ffmpeg_trim(base, trimmed_ge, trim_start, trim_end)
-                    src = trimmed_ge if trimmed_ge.exists() else base
-                else:
-                    src = base
+                trimmed_ge = tmp / f"group_{group_idx:03d}_gameend.mp4"
+                _ffmpeg_trim(base, trimmed_ge, trim_start, trim_end)
+                src = trimmed_ge if trimmed_ge.exists() else base
             elif lead.get("period_transition"):
                 # ── Period-transition animation — loudnorm to match game footage ──
                 src_raw = Path(lead["path"])
