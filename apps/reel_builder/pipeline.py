@@ -334,24 +334,34 @@ def _audio_peak_time(video_path) -> float | None:
         return None
 
 
-def _trim_scoring_chances(
+def _trim_chance_clips(
     results: list[dict],
     pre_s: float = 5.0,
     post_s: float = 3.0,
     min_trim_len_s: float = 12.0,
 ) -> list[dict]:
-    """Trim scoring-chance clips to a window around their loudest moment.
+    """Trim scoring-chance AND faceoff-inferred-goal leads to a window around
+    their loudest moment.
 
-    Goals are anchored to the GOAL banner and trimmed tight; scoring chances
-    have no such anchor, so a full ~45s scene would otherwise play in full.
-    Anchor on the audio peak (the shot/save) and keep [peak-pre, peak+post].
-    Clips already shorter than min_trim_len_s, or that already carry a trim
-    window, are left alone; clips with no detectable audio peak fall back to
-    no trim (shown in full, as before).
+    Banner goals are anchored to the GOAL banner and trimmed tight; scoring
+    chances and *inferred* goals have no banner anchor, so their full ~45s scene
+    would otherwise play in full (a weak faceoff-pattern inference is usually
+    just a chance). Anchor on the audio peak (the shot/save) and keep
+    [peak-pre, peak+post]. The reel builder applies this window to the lead clip
+    only — chained celebration/replays still follow. Banner goals are never
+    touched here (they roll naturally to the scene end). Clips already shorter
+    than min_trim_len_s, already carrying a trim window, or with no detectable
+    audio peak are left as-is.
     """
     trimmed = 0
     for seg in results:
-        if seg.get("label") != "scoring_chance":
+        is_sc = seg.get("label") == "scoring_chance"
+        is_inferred = (
+            seg.get("label") == "goal"
+            and seg.get("inferred_goal")
+            and not seg.get("banner_detected")
+        )
+        if not (is_sc or is_inferred):
             continue
         if "trim_start_s" in seg and "trim_end_s" in seg:
             continue
@@ -368,12 +378,13 @@ def _trim_scoring_chances(
         seg["trim_start_s"] = start
         seg["trim_end_s"] = end
         logger.info(
-            "  Trimmed scoring_chance to [%.1f–%.1fs] around audio peak %.1fs: %s",
+            "  Trimmed %s to [%.1f–%.1fs] around audio peak %.1fs: %s",
+            "inferred goal" if is_inferred else "scoring_chance",
             start, end, peak, Path(seg["path"]).name,
         )
         trimmed += 1
     if trimmed:
-        logger.info("  Trimmed %d scoring_chance clip(s) to the action.", trimmed)
+        logger.info("  Trimmed %d chance/inferred clip(s) to the action.", trimmed)
     return results
 
 
@@ -1113,9 +1124,9 @@ def run_pipeline(
     logger.info("━━━  Step 4f.5: Rescuing demoted goals as scoring chances  ━━━")
     results = _rescue_demoted_goals(results)
 
-    # ── Step 4f.6: Trim scoring chances to the action (audio peak) ───────────
-    logger.info("━━━  Step 4f.6: Trimming scoring chances to audio peak  ━━━")
-    results = _trim_scoring_chances(results)
+    # ── Step 4f.6: Trim scoring chances + inferred goals to the action ───────
+    logger.info("━━━  Step 4f.6: Trimming chance/inferred clips to audio peak  ━━━")
+    results = _trim_chance_clips(results)
 
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")

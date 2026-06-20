@@ -425,10 +425,17 @@ def _merge_goal_sequence(group: list[dict], output: Path, tmp: Path) -> None:
     for k, seg in enumerate(group):
         src = Path(seg["path"])
         if k == 0 and "trim_start_s" in seg:
-            # Goal clip: trim from the pre-goal window start to end-of-file
-            # (let it roll naturally into the goal moment and beyond)
             part = tmp / f"seq_raw_{k}_{output.stem}.mp4"
-            _ffmpeg_trim_start(src, part, seg["trim_start_s"])
+            if seg.get("inferred_goal") and not seg.get("banner_detected") and "trim_end_s" in seg:
+                # Inferred (no-banner) goal: trim the lead to the audio-peak
+                # window — a weak faceoff-pattern inference is usually just a
+                # chance, so don't show the whole ~45s scene. Chained
+                # celebration/replays still follow.
+                _ffmpeg_trim(src, part, seg["trim_start_s"], seg["trim_end_s"])
+            else:
+                # Banner goal: trim from the pre-goal window start to end-of-file
+                # (let it roll naturally into the goal moment and beyond).
+                _ffmpeg_trim_start(src, part, seg["trim_start_s"])
             parts.append(part)
         else:
             parts.append(src)
