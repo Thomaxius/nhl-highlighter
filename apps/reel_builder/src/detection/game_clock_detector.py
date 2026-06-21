@@ -81,7 +81,12 @@ class GameClockDetector:
         period_end_confirm_interval_s: float = 1.0,
     ) -> None:
         self.template_threshold = template_threshold
-        self.scale_factors = scale_factors or [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        # Range goes down to 0.5: some sources (e.g. 4K→1080p downscales) render
+        # the clock HUD ~10% smaller than the template, matching best near scale
+        # 0.55. Without the smaller scales the period-start templates miss
+        # entirely (best ~0.46, below the gate), so no periods/transitions get
+        # detected. Larger-than-1.0 scales are kept for slightly bigger HUDs.
+        self.scale_factors = scale_factors or [0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
         self.min_game_end_conf = min_game_end_conf
         self.min_period_end_conf = min_period_end_conf
         self.min_period_start_conf = min_period_start_conf

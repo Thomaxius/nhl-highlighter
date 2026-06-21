@@ -1122,6 +1122,36 @@ def run_pipeline(
             logger.info("  Demoted %d segment(s) containing pause menu.", paused_count)
         if eog_tagged:
             logger.info("  Tagged %d segment(s) as END OF GAME via menu template.", eog_tagged)
+
+        # The END-OF-GAME menu template also matches inter-period intermission
+        # menus (same scoreboard layout), so the 1st/2nd intermissions get
+        # falsely tagged game_end and the reel ends up showing a "1ST
+        # Intermission" screen. Only the LAST cluster of game_end segments is the
+        # real end of game — demote the earlier (intermission) clusters back to
+        # menu so they're excluded.
+        ge_idx = [i for i, r in enumerate(results) if r.get("game_end")]
+        if len(ge_idx) > 1:
+            _CLUSTER_GAP = 5   # >5 segments apart ⇒ a separate cluster
+            last_cluster_start = ge_idx[0]
+            for a, b in zip(ge_idx, ge_idx[1:]):
+                if b - a > _CLUSTER_GAP:
+                    last_cluster_start = b
+            demoted_ge = 0
+            for i in ge_idx:
+                if i < last_cluster_start:
+                    r = results[i]
+                    r["game_end"] = False
+                    r.pop("clock_event", None)
+                    r.pop("game_end_score", None)
+                    r["label"] = "other"
+                    r["has_menu"] = True
+                    demoted_ge += 1
+                    logger.info(
+                        "  Demoted earlier game_end (intermission menu, not end of game): %s",
+                        Path(r["path"]).name,
+                    )
+            if demoted_ge:
+                logger.info("  Kept only the final game_end cluster; demoted %d intermission menu(s).", demoted_ge)
     else:
         logger.info("Skipping pause-menu detection (apps/reel_builder/configs/pause_menu_template.png not found)")
 
