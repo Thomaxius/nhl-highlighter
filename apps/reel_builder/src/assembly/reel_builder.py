@@ -389,6 +389,10 @@ def build_reel(
             "\n".join(f"file '{str(c)}'" for c in faded_clips)
         )
         concat_out = tmp / "concat.mp4"
+        # Dump every input clip's stream/timing profile first: if the mux below
+        # fails, this pinpoints the offending clip (missing audio, wrong fps,
+        # video/audio length divergence) without needing to re-run.
+        _log_clips_debug(faded_clips, "final concat")
         _ffmpeg_concat_final(concat_list, concat_out)
 
         # Step 4: Mix in background music (optional)
@@ -604,10 +608,10 @@ def _add_fades(
             vf_parts.append(f"fade=t=out:st={st:.3f}:d={fade_duration}")
             af_parts.append(f"afade=t=out:st={st:.3f}:d={fade_duration}")
     # Force a constant 30 fps with regenerated timestamps and resync the audio.
-    # A VFR or bad-PTS source clip would otherwise survive to the final concat
-    # and produce multi-second frozen frames + A/V drift ("audio on its own
-    # life"). +genpts (input) regenerates timestamps, -r 30/-vsync cfr forces a
-    # constant frame rate, aresample=async=1 locks audio to the video clock.
+    # A VFR or bad-PTS source clip would otherwise survive into the final concat
+    # and produce multi-second frozen frames + A/V drift. +genpts regenerates
+    # input timestamps, -r 30/-vsync cfr forces constant frame rate, and
+    # aresample=async=1 locks the audio to the video clock.
     cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-i", str(src)]
     if vf_parts:
         cmd += ["-vf", ",".join(vf_parts)]
@@ -636,6 +640,54 @@ def _probe_duration(path: Path) -> float | None:
         return float(result.stdout.strip())
     except (ValueError, AttributeError):
         return None
+
+
+def _probe_clip_debug(path: Path) -> str:
+    """Return a one-line summary of a clip's container + per-stream timing, for
+    diagnosing concat/mux failures (mismatched fps, missing audio, video/audio
+    length divergence that trips the muxer)."""
+    if not path.exists():
+        return f"{path.name}: MISSING"
+    import json
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-of", "json",
+         "-show_entries",
+         "format=duration,nb_streams:"
+         "stream=codec_type,codec_name,duration,avg_frame_rate,nb_frames,"
+         "start_time,time_base",
+         str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError):
+        return f"{path.name}: UNPROBEABLE ({result.stderr.strip()[:120]})"
+    fmt = data.get("format", {})
+    parts = [_fmt_stream(s) for s in data.get("streams", [])]
+    return (
+        f"{path.name}: dur={fmt.get('duration', '?')}s "
+        f"nb_streams={fmt.get('nb_streams', '?')} | " + " | ".join(parts)
+    )
+
+
+def _fmt_stream(s: dict) -> str:
+    t = str(s.get("codec_type", "?"))[:1]
+    return (
+        f"{t}:{s.get('codec_name', '?')} "
+        f"dur={s.get('duration', '?')} "
+        f"fps={s.get('avg_frame_rate', '?')} "
+        f"nbf={s.get('nb_frames', '?')} "
+        f"start={s.get('start_time', '?')} "
+        f"tb={s.get('time_base', '?')}"
+    )
+
+
+def _log_clips_debug(clips: list[Path], stage: str) -> None:
+    """Log a per-clip stream/timing dump before a concat so a later mux failure
+    can be traced to the offending clip without re-running."""
+    logger.info("[concat-debug] %s — %d clip(s):", stage, len(clips))
+    for i, c in enumerate(clips):
+        logger.info("[concat-debug]   [%02d] %s", i, _probe_clip_debug(c))
 
 
 def _enforce_max_duration(output: Path, max_seconds: int) -> None:
@@ -700,6 +752,12 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
     # duration balloons to ~24h and playback freezes partway through. All inputs
     # are already uniform libx264/aac, so this re-encode is cheap and produces
     # clean, monotonic presentation timestamps.
+    # NOTE: deliberately NO "-max_interleave_delta 0" here. With CFR video the
+    # last clip's video runs a few frames past its audio (dup frames); that flag
+    # forces the muxer to buffer trailing video indefinitely waiting for audio it
+    # will never get, and the final flush dies with a bare "Conversion failed!"
+    # *after* a fully successful encode. The default interleave window flushes
+    # sparse tails cleanly.
     cmd = [
         "ffmpeg", "-y",
         "-fflags", "+genpts",
@@ -708,15 +766,33 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
         "-i", str(concat_list),
         "-c:v", "libx264", "-crf", "18", "-preset", "fast",
         "-c:a", "aac", "-ar", "44100",
-        "-af", "aresample=async=1",
-        "-r", "30", "-vsync", "cfr",
+        "-vsync", "cfr",
         "-avoid_negative_ts", "make_zero",
-        "-max_interleave_delta", "0",
         str(output),
     ]
+    logger.info("[concat-debug] concat list:\n%s", concat_list.read_text())
+    logger.info("[concat-debug] running: %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"Final concat failed:\n{result.stderr[-300:]}")
+        # The encoder prints its stats summary last, which pushes the real cause
+        # off the tail of stderr. Dump the *full* stderr (plus the command and
+        # the concat list) next to the output so a failure is always diagnosable
+        # without re-running.
+        err_log = output.with_name(output.stem + "_concat_error.log")
+        try:
+            err_log.write_text(
+                "CMD:\n" + " ".join(cmd) + "\n\n"
+                "CONCAT LIST:\n" + concat_list.read_text() + "\n\n"
+                "STDERR:\n" + result.stderr
+            )
+        except OSError:
+            pass
+        # Log the full stderr too, so it lands in the pipeline log even if the
+        # sidecar file can't be fetched.
+        logger.error("[concat-debug] FULL ffmpeg stderr:\n%s", result.stderr)
+        raise RuntimeError(
+            f"Final concat failed (full log: {err_log}):\n{result.stderr[-1500:]}"
+        )
 
 
 def _mix_music(video: Path, music: Path, output: Path) -> None:
