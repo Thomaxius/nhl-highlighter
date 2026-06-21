@@ -455,10 +455,12 @@ def _merge_goal_sequence(group: list[dict], output: Path, tmp: Path) -> None:
     for k, p in enumerate(parts):
         enc = tmp / f"seq_enc_{k}_{output.stem}.mp4"
         cmd = [
-            "ffmpeg", "-y", "-i", str(p),
+            "ffmpeg", "-y", "-fflags", "+genpts", "-i", str(p),
             "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-r", "30", "-vsync", "cfr",
             "-c:a", "aac", "-ar", "44100",
             "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1",
+            "-af", "aresample=async=1",
             str(enc),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -601,13 +603,19 @@ def _add_fades(
             st = max(0.0, dur - fade_duration)
             vf_parts.append(f"fade=t=out:st={st:.3f}:d={fade_duration}")
             af_parts.append(f"afade=t=out:st={st:.3f}:d={fade_duration}")
-    cmd = ["ffmpeg", "-y", "-i", str(src)]
+    # Force a constant 30 fps with regenerated timestamps and resync the audio.
+    # A VFR or bad-PTS source clip would otherwise survive to the final concat
+    # and produce multi-second frozen frames + A/V drift ("audio on its own
+    # life"). +genpts (input) regenerates timestamps, -r 30/-vsync cfr forces a
+    # constant frame rate, aresample=async=1 locks audio to the video clock.
+    cmd = ["ffmpeg", "-y", "-fflags", "+genpts", "-i", str(src)]
     if vf_parts:
         cmd += ["-vf", ",".join(vf_parts)]
-    if af_parts:
-        cmd += ["-af", ",".join(af_parts)]
+    af_parts.append("aresample=async=1")
+    cmd += ["-af", ",".join(af_parts)]
     cmd += [
         "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-r", "30", "-vsync", "cfr",
         "-c:a", "aac", "-ar", "44100",
         str(dst),
     ]
@@ -700,7 +708,8 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
         "-i", str(concat_list),
         "-c:v", "libx264", "-crf", "18", "-preset", "fast",
         "-c:a", "aac", "-ar", "44100",
-        "-vsync", "cfr",
+        "-af", "aresample=async=1",
+        "-r", "30", "-vsync", "cfr",
         "-avoid_negative_ts", "make_zero",
         "-max_interleave_delta", "0",
         str(output),
