@@ -35,6 +35,7 @@ Only the last N seconds of the video are scanned (SCAN_FROM_END_S).
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -696,6 +697,40 @@ def _goalie_lines(rows: list[dict[str, str]]) -> list[str]:
     return lines
 
 
+def _roster_last_names(screens: list[StatsScreen]) -> list[str]:
+    """Collect player surnames from the parsed stats rows (e.g. 'M. Tkachuk' →
+    'Tkachuk'). This is the game's *actual* roster — including edited/created
+    players — used to spell-correct the OCR'd star names."""
+    names: set[str] = set()
+    for s in screens:
+        for row in getattr(s, "rows", []):
+            player = (row.get("PLAYER") or "").strip()
+            if not player:
+                continue
+            last = player.split()[-1]   # surname is the last token
+            if last.isalpha() and len(last) >= 3:
+                names.add(last)
+    return sorted(names)
+
+
+def _correct_name_via_roster(name: str, roster_last_names: list[str]) -> str:
+    """Snap a star's surname to the closest roster surname when the OCR is a
+    near-miss (e.g. 'Sharangovic' → 'Sharangovich'). Conservative: only replaces
+    on a high-similarity match (cutoff 0.85), keeps the first name as-is, and
+    never invents a name when nothing is close (so badly-mangled or
+    created-player names are left untouched)."""
+    if not name or not roster_last_names:
+        return name
+    parts = name.split()
+    if len(parts) < 2:
+        return name
+    last = parts[-1]
+    match = difflib.get_close_matches(last, roster_last_names, n=1, cutoff=0.85)
+    if match and match[0] != last:
+        return " ".join(parts[:-1] + [match[0]])
+    return name
+
+
 def format_description(
     title: str,
     screens: list[StatsScreen],
@@ -735,13 +770,17 @@ def format_description(
     if stars:
         rank_order = ["FIRST", "SECOND", "THIRD"]
         by_rank = {s.rank: s for s in stars}
+        roster = _roster_last_names(screens)   # spell-correct names off the box score
         stars_lines: list[str] = []
         for rank in rank_order:
             star = by_rank.get(rank)
             if star is None:
                 continue
             emoji = _RANK_STARS.get(rank, "⭐")
-            name_part = star.player_name or "(unknown)"
+            name_part = (
+                _correct_name_via_roster(star.player_name, roster)
+                if star.player_name else "(unknown)"
+            )
             line = f"{emoji} {name_part}"
             stats = _star_stats_compact(getattr(star, "player_stats", ""))
             if stats:

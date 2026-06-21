@@ -343,7 +343,14 @@ def _match_banner(frame: np.ndarray, template: np.ndarray) -> float:
     region = frame[BANNER_Y0:BANNER_Y1, BANNER_X0:BANNER_X1]
     if region.shape[0] < template.shape[0] or region.shape[1] < template.shape[1]:
         return 0.0
-    return float(cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED).max())
+    # Match on luminance, not colour. The gold "★ STAR" ribbon's exact shade
+    # shifts a little with team colour and 4K→1080p downscaling, which drags a
+    # colour match below the gate (FIRST/THIRD fell to ~0.82). Greyscale matches
+    # the ribbon's structure instead and is robust to that (the same ribbons
+    # jump to ~0.92), while the ranks still separate (cross-rank ≤0.82 < gate).
+    region_g = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    template_g = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    return float(cv2.matchTemplate(region_g, template_g, cv2.TM_CCOEFF_NORMED).max())
 
 
 def _stats_animation_done(
