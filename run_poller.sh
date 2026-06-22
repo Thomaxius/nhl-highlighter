@@ -23,4 +23,9 @@ export APP_DIR="${APP_DIR:-$ROOT}"
 export OAUTH_CLIENT_SECRETS="${OAUTH_CLIENT_SECRETS:-$ROOT/config/client_secrets.json}"
 export OAUTH_TOKEN_FILE="${OAUTH_TOKEN_FILE:-$ROOT/config/token.json}"
 
+# Preflight: abort if disk is low or OAuth tokens need reauth.
+# shellcheck source=scripts/preflight.sh
+source "$ROOT/scripts/preflight.sh"
+preflight "$ROOT" "$PYTHON"
+
 exec "$PYTHON" "$ROOT/apps/poller/youtube_watcher.py" "$@"
