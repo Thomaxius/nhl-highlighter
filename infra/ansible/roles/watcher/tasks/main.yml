@@ -23,6 +23,30 @@
     group: "{{ app_user }}"
     mode: "0600"  # secrets — not world-readable
 
+- name: Ensure apps/auth directory exists
+  ansible.builtin.file:
+    path: "{{ app_dir }}/apps/auth"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
+- name: Copy OAuth token refresher script
+  ansible.builtin.copy:
+    src: ../../../../apps/auth/refresh_tokens.py
+    dest: "{{ app_dir }}/apps/auth/refresh_tokens.py"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
+- name: Copy OAuth reauth helper script
+  ansible.builtin.copy:
+    src: ../../../../apps/auth/reauth.py
+    dest: "{{ app_dir }}/apps/auth/reauth.py"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+
 - name: Template systemd service
   ansible.builtin.template:
     src: nhl-watcher.service.j2
@@ -30,9 +54,28 @@
     mode: "0644"
   notify: Reload and restart watcher
 
+- name: Template token-refresher service
+  ansible.builtin.template:
+    src: nhl-token-refresher.service.j2
+    dest: /etc/systemd/system/nhl-token-refresher.service
+    mode: "0644"
+
+- name: Template token-refresher timer
+  ansible.builtin.template:
+    src: nhl-token-refresher.timer.j2
+    dest: /etc/systemd/system/nhl-token-refresher.timer
+    mode: "0644"
+
 - name: Enable and start watcher service
   ansible.builtin.systemd:
     name: nhl-watcher
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Enable and start token-refresher timer
+  ansible.builtin.systemd:
+    name: nhl-token-refresher.timer
     enabled: true
     state: started
     daemon_reload: true
