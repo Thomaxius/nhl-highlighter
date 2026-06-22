@@ -610,11 +610,12 @@ def run_pipeline(
             "━━━  Parallel scan: %s  (banner=%s  clock=%s  vs=%s)  ━━━",
             _bsc_clip.name, bool(_bsc_banner), bool(_bsc_clock), bool(_bsc_vs),
         )
-        # max_workers=2 (not 3): each scan holds its own FFmpeg decoder whose
-        # frame buffers add up — three concurrent 1080p decodes OOM-killed the
-        # pipeline on the 8 GB server. The VS scan is capped at 300 s, so it
-        # just queues behind whichever full-length scan finishes first.
-        with _ScanPool(max_workers=2) as _bsc_pool:
+        # max_workers=4: each scan holds its own FFmpeg decoder whose frame
+        # buffers add up — three concurrent 1080p decodes OOM-killed the
+        # pipeline on the 8 GB server, but a beefier local machine can run all
+        # three scans (banner/clock/vs) at once. The VS scan is capped at 300 s,
+        # so it just queues behind whichever full-length scan finishes first.
+        with _ScanPool(max_workers=4) as _bsc_pool:
             _bsc_bf = _bsc_pool.submit(_bsc_banner.scan_video, _bsc_clip, 1.0) if _bsc_banner else None
             _bsc_cf = _bsc_pool.submit(_bsc_clock.scan_video,  _bsc_clip)      if _bsc_clock  else None
             # VS screen only appears in the first few minutes of a recording;
@@ -865,9 +866,29 @@ def run_pipeline(
                         if start_s <= ev_t < end_s:
                             seg[ev_type] = True
                             seg["clock_event"] = ev_type
+                            # Carry the template's declared period (if any) so the
+                            # numbering pass can advance monotonically by template
+                            # rather than blindly +1 on every (possibly false) hit.
+                            if ev.get("period") is not None:
+                                seg["clock_period"] = ev["period"]
                             logger.info(
                                 "%s at t=%.1fs → %s",
                                 ev_type, ev_t, Path(seg["path"]).name,
+                            )
+                            break
+
+                elif ev_type == "ot_period_end":
+                    # OT buzzer (clock near 0:00 with an "OT" label) — a genuine
+                    # overtime clock signal. Tag the covering segment so the OT
+                    # boundary can be confirmed from the clock, not just from the
+                    # highlight classifier (which menus can fool).
+                    for (start_s, end_s, seg) in seg_times:
+                        if start_s <= ev_t < end_s:
+                            seg["ot_period_end"] = True
+                            seg["clock_event"] = ev_type
+                            logger.info(
+                                "OT period-end at t=%.1fs → %s",
+                                ev_t, Path(seg["path"]).name,
                             )
                             break
     else:
@@ -888,8 +909,17 @@ def run_pipeline(
     _period = 1
     for _r in results:
         # Advance BEFORE numbering when we hit a puck-drop start signal.
-        if _r.get("period_start") and _period < 3:
-            _period = min(_period + 1, 3)
+        # Prefer the template's DECLARED period (clock_period) and take the max
+        # so the counter is monotonic: a single false/duplicate period_start
+        # (e.g. a "period 2" template matching mid-period, or a stray "period 1"
+        # match late in the game) can no longer over-advance or rewind it.
+        if _r.get("period_start") or _r.get("game_start"):
+            declared = _r.get("clock_period")
+            if declared is not None:
+                _period = max(_period, min(int(declared), 3))
+            elif _r.get("period_start") and _period < 3:
+                # No declared period (OCR-only hit) — fall back to a single step.
+                _period = min(_period + 1, 3)
         _r["period_number"] = _period
         if _r.get("period_end"):
             _period = min(_period + 1, 3)
@@ -1203,11 +1233,12 @@ def run_pipeline(
     # the scans run in a background thread concurrently with the build. They
     # overlap into a single wall-clock block, so one combined header is logged
     # here; results are collected (and logged/saved) after build_reel returns.
-    # max_workers=1: the two scans run sequentially but still fully overlap the
-    # reel build, while holding only one extra video decoder in memory.
+    # max_workers=2: the two scans run concurrently (and still overlap the
+    # reel build). On the 8 GB server this was 1 to hold only one extra video
+    # decoder in memory; a beefier local machine can afford both at once.
     from concurrent.futures import ThreadPoolExecutor as _StatsPool
     logger.info("━━━  Step 6: Building reel + stats/star scan (concurrent)  ━━━")
-    _stats_pool = _StatsPool(max_workers=1)
+    _stats_pool = _StatsPool(max_workers=2)
     _stats_future = _stats_pool.submit(
         lambda: [detect_stats_screens(clip) for clip in normalised]
     )
@@ -1221,21 +1252,45 @@ def run_pipeline(
     # clock detector.  Only transitions to confirmed periods are injected.
     confirmed_period_boundaries: set[int] = set()
     _OT_HIGHLIGHT_LABELS = {"goal", "celebration", "goal_replay", "other_replay", "scoring_chance"}
+    _OT_MIN_HIGHLIGHTS = 5  # how many real OT highlights it takes to confirm OT
+    _ot_highlight_count = 0
+    _ot_clock_signal = False
     for _r in results:
         if _r.get("period_end"):
             confirmed_period_boundaries.add(_r.get("period_number", 1) + 1)
         if _r.get("period_start") or _r.get("game_start"):
             confirmed_period_boundaries.add(_r.get("period_number", 1))
-        # Overtime (period 4+) is only real if an actual highlight was played in
-        # it. regulation_end alone just means the 3rd period ended — the game may
-        # be over, with only post-game menu/stats screens after it, in which case
-        # injecting the OT transition is wrong.
+        # ── Overtime evidence ────────────────────────────────────────────────
+        # regulation_end alone just means the 3rd period ended — the game may be
+        # over, with only post-game menu/stats screens after it, so injecting an
+        # OT transition off a single (mis)classified menu frame is wrong.
+        # Treat OT as real only if EITHER the clock detector actually saw an OT
+        # period (ot_period_end), OR there are several genuine OT highlights.
+        if _r.get("ot_period_end"):
+            _ot_clock_signal = True
         if (_r.get("period_number", 1) >= 4
                 and _r.get("label") in _OT_HIGHLIGHT_LABELS
                 and not _r.get("game_end")
                 and not _r.get("regulation_end")
                 and not _r.get("has_menu")):
-            confirmed_period_boundaries.add(_r.get("period_number", 1))
+            _ot_highlight_count += 1
+
+    # Confirm every OT period present only when the evidence clears the bar.
+    _ot_periods = {_r.get("period_number", 1) for _r in results if _r.get("period_number", 1) >= 4}
+    if _ot_periods:
+        if _ot_clock_signal or _ot_highlight_count >= _OT_MIN_HIGHLIGHTS:
+            confirmed_period_boundaries.update(_ot_periods)
+            logger.info(
+                "  Overtime confirmed (clock_signal=%s, ot_highlights=%d) — periods %s",
+                _ot_clock_signal, _ot_highlight_count, sorted(_ot_periods),
+            )
+        else:
+            logger.info(
+                "  Overtime NOT confirmed (clock_signal=%s, ot_highlights=%d < %d) — "
+                "skipping OT transition (likely post-game menu footage).",
+                _ot_clock_signal, _ot_highlight_count, _OT_MIN_HIGHLIGHTS,
+            )
+
     if confirmed_period_boundaries:
         logger.info("  Confirmed period boundaries: %s", sorted(confirmed_period_boundaries))
     else:

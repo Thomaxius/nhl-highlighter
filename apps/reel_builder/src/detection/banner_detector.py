@@ -204,7 +204,7 @@ class BannerDetector:
         import os
         from concurrent.futures import ThreadPoolExecutor
 
-        workers = min(4, max(1, os.cpu_count() or 2))
+        workers = min(8, max(1, os.cpu_count() or 2))
         CHUNK_FRAMES = 32
 
         def _match(item: tuple[int, np.ndarray]) -> tuple[int, float]:

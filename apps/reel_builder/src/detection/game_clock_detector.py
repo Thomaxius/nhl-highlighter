@@ -279,7 +279,11 @@ class GameClockDetector:
                             "  Period-start template match: period=%d  event=%s  conf=%.2f  %s (%.1fs)",
                             period_num, ev_type, conf, self._fmt_t(t), t,
                         )
-                        raw_events.append({"time_s": t, "event": ev_type})
+                        # Carry the template's declared period so the pipeline
+                        # can number periods by the matched template (monotonic)
+                        # rather than blindly incrementing on every hit — a single
+                        # false duplicate would otherwise over-advance the counter.
+                        raw_events.append({"time_s": t, "event": ev_type, "period": period_num})
                         break  # only fire the highest-confidence match per frame
         cap.release()
 
@@ -562,6 +566,7 @@ class GameClockDetector:
         for ev in events:
             if (merged
                     and merged[-1]["event"] == ev["event"]
+                    and merged[-1].get("period") == ev.get("period")
                     and ev["time_s"] - merged[-1]["time_s"] <= gap_s):
                 continue  # duplicate — keep the first (earliest) occurrence
             merged.append(ev)
