@@ -18,6 +18,7 @@ import argparse
 import datetime
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -48,8 +49,13 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 
-def _setup_file_logging(output_path) -> Path:
-    """Attach a timestamped FileHandler to the root logger for this pipeline run."""
+def _setup_file_logging(output_path) -> tuple[Path, logging.Handler]:
+    """Attach a timestamped FileHandler to the root logger for this pipeline run.
+
+    Returns ``(log_file, handler)`` so the caller can detach the handler when the
+    run finishes — important in folder mode, where one process builds several
+    reels in a loop and each must log to its own file only.
+    """
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -62,7 +68,7 @@ def _setup_file_logging(output_path) -> Path:
         datefmt="%H:%M:%S",
     ))
     logging.getLogger().addHandler(fh)
-    return log_file
+    return log_file, fh
 
 
 def _chain_goal_sequences(
@@ -1452,6 +1458,53 @@ def run_smoke_test(checkpoint: str) -> int:
     return 1 if failures else 0
 
 
+def _build_one(file_path: Path, output_path: str, args) -> bool:
+    """Run the full pipeline on a SINGLE video file in isolation.
+
+    The file is hardlinked into a throwaway temp dir so the ingest step sees a
+    one-file folder (and never merges in other videos). Each call logs to its
+    own file and tears the handler down afterwards, so building several reels in
+    one process (folder mode) keeps each run's logs separate.
+
+    Returns True on success, False if the run raised (so folder mode can carry
+    on with the remaining files).
+    """
+    import tempfile
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="pipeline_single_", dir="."))
+    try:
+        link = tmp / file_path.name
+        try:
+            os.link(file_path, link)        # hardlink — instant, no extra disk
+        except OSError:
+            shutil.copy2(file_path, link)   # cross-device fallback
+
+        log_file, fh = _setup_file_logging(output_path)
+        try:
+            logger.info("Logging to %s", log_file)
+            logger.info("Processing: %s  →  %s", file_path.name, output_path)
+            run_pipeline(
+                input_dir=str(tmp),
+                output_path=output_path,
+                checkpoint=args.checkpoint,
+                music_path=args.music,
+                max_clips=args.max_clips,
+                min_confidence=args.min_confidence,
+                sc_min_confidence=args.sc_min_confidence,
+                sc_rescue_confidence=args.sc_rescue_confidence,
+            )
+            return True
+        except Exception:
+            logger.exception("Pipeline failed for %s", file_path.name)
+            return False
+        finally:
+            logging.getLogger().removeHandler(fh)
+            fh.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     p = argparse.ArgumentParser(description="NHL 25 Highlight Reel Generator")
 
@@ -1486,29 +1539,36 @@ def main():
         raise SystemExit(run_smoke_test(checkpoint=args.checkpoint))
 
     if args.file:
-        # Wrap the single file in a temp dir so the pipeline's ingest step
-        # sees it as a one-file folder without touching the original.
-        import tempfile
+        # Single explicit file → one reel at the requested output path.
         file_path = Path(args.file).resolve()
-        tmp = tempfile.mkdtemp(prefix="pipeline_single_", dir='.')
-        os.link(file_path, Path(tmp) / file_path.name)   # hardlink — instant, no extra disk
-        input_dir = tmp
-    else:
-        input_dir = args.folder or "apps/shared/data/raw"
+        if not file_path.is_file():
+            raise SystemExit(f"File not found: {file_path}")
+        ok = _build_one(file_path, args.output, args)
+        raise SystemExit(0 if ok else 1)
 
-    log_file = _setup_file_logging(args.output)
-    logger.info("Logging to %s", log_file)
+    # Folder mode: process ONE file at a time, each producing its own reel.
+    # Previously every video in the folder was ingested together and merged
+    # into a single reel, which mixed unrelated games. Now each file is run in
+    # isolation and its reel is named after the source video.
+    folder = Path(args.folder or "apps/shared/data/raw")
+    if not folder.is_dir():
+        raise SystemExit(f"Folder not found: {folder}")
+    video_exts = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+    files = sorted(p for p in folder.iterdir() if p.suffix.lower() in video_exts)
+    if not files:
+        raise SystemExit(f"No video files found in {folder}")
 
-    run_pipeline(
-        input_dir=input_dir,
-        output_path=args.output,
-        checkpoint=args.checkpoint,
-        music_path=args.music,
-        max_clips=args.max_clips,
-        min_confidence=args.min_confidence,
-        sc_min_confidence=args.sc_min_confidence,
-        sc_rescue_confidence=args.sc_rescue_confidence,
-    )
+    exports_dir = Path(args.output).parent if args.output else Path("apps/shared/data/exports")
+    logger.info("Folder mode: %d file(s) to process — one reel each.", len(files))
+    failures = 0
+    for i, fp in enumerate(files, 1):
+        out = str(exports_dir / f"{fp.stem}.mp4")
+        logger.info("━━━  [%d/%d]  %s  ━━━", i, len(files), fp.name)
+        if not _build_one(fp.resolve(), out, args):
+            failures += 1
+    if failures:
+        logger.warning("Folder run finished with %d/%d file(s) failed.", failures, len(files))
+    raise SystemExit(1 if failures else 0)
 
 
 if __name__ == "__main__":
