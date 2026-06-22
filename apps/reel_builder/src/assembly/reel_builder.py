@@ -752,12 +752,6 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
     # duration balloons to ~24h and playback freezes partway through. All inputs
     # are already uniform libx264/aac, so this re-encode is cheap and produces
     # clean, monotonic presentation timestamps.
-    # NOTE: deliberately NO "-max_interleave_delta 0" here. With CFR video the
-    # last clip's video runs a few frames past its audio (dup frames); that flag
-    # forces the muxer to buffer trailing video indefinitely waiting for audio it
-    # will never get, and the final flush dies with a bare "Conversion failed!"
-    # *after* a fully successful encode. The default interleave window flushes
-    # sparse tails cleanly.
     cmd = [
         "ffmpeg", "-y",
         "-fflags", "+genpts",
@@ -768,6 +762,7 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
         "-c:a", "aac", "-ar", "44100",
         "-vsync", "cfr",
         "-avoid_negative_ts", "make_zero",
+        "-max_interleave_delta", "0",
         str(output),
     ]
     logger.info("[concat-debug] concat list:\n%s", concat_list.read_text())
@@ -787,11 +782,37 @@ def _ffmpeg_concat_final(concat_list: Path, output: Path) -> None:
             )
         except OSError:
             pass
+        # Classify the failure so we don't chase a codec/mux bug when the real
+        # problem is the environment. Two common non-codec causes on this box:
+        #   * "No space left on device" — the encode runs to completion then
+        #     dies writing the final packets/trailer (disk full). The full
+        #     output size is printed just before the error.
+        #   * a negative return code (rc == -N) — ffmpeg was killed by signal N
+        #     (e.g. -9 SIGKILL = OOM killer).
+        rc = result.returncode
+        cause = ""
+        if "No space left on device" in result.stderr:
+            import shutil
+            usage = shutil.disk_usage(str(output.parent))
+            cause = (
+                f"  ← DISK FULL (No space left on device). "
+                f"{usage.free // (1024*1024)} MiB free of "
+                f"{usage.total // (1024*1024)} MiB on {output.parent}. "
+                "Not a codec/concat error — free disk space."
+            )
+        elif rc < 0:
+            cause = (
+                f"  ← ffmpeg was KILLED by signal {-rc}"
+                f"{' (SIGKILL — possibly the OOM killer)' if -rc == 9 else ''}; "
+                "not a codec/concat error."
+            )
         # Log the full stderr too, so it lands in the pipeline log even if the
-        # sidecar file can't be fetched.
-        logger.error("[concat-debug] FULL ffmpeg stderr:\n%s", result.stderr)
+        # sidecar file can't be fetched. (Note: if the disk is full, even this
+        # log write may fail — the sidecar and console traceback are backups.)
+        logger.error("[concat-debug] ffmpeg returncode=%s%s\nFULL stderr:\n%s",
+                     rc, cause, result.stderr)
         raise RuntimeError(
-            f"Final concat failed (full log: {err_log}):\n{result.stderr[-1500:]}"
+            f"Final concat failed (rc={rc}{cause}; full log: {err_log}):\n{result.stderr[-1500:]}"
         )
 
 
