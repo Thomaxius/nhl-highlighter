@@ -17,6 +17,7 @@ The pipeline runs:
 import argparse
 import datetime
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -610,12 +611,13 @@ def run_pipeline(
             "━━━  Parallel scan: %s  (banner=%s  clock=%s  vs=%s)  ━━━",
             _bsc_clip.name, bool(_bsc_banner), bool(_bsc_clock), bool(_bsc_vs),
         )
-        # max_workers=4: each scan holds its own FFmpeg decoder whose frame
-        # buffers add up — three concurrent 1080p decodes OOM-killed the
-        # pipeline on the 8 GB server, but a beefier local machine can run all
-        # three scans (banner/clock/vs) at once. The VS scan is capped at 300 s,
-        # so it just queues behind whichever full-length scan finishes first.
-        with _ScanPool(max_workers=4) as _bsc_pool:
+        # max_workers=2 (not 3): each scan holds its own FFmpeg decoder whose
+        # frame buffers add up — three concurrent 1080p decodes OOM-killed the
+        # pipeline on the 8 GB server. The VS scan is capped at 300 s, so it
+        # just queues behind whichever full-length scan finishes first.
+        # --local (NHL_LOCAL=1) lifts this to 4 so all three scans run at once.
+        _scan_workers = 4 if os.environ.get("NHL_LOCAL") == "1" else 2
+        with _ScanPool(max_workers=_scan_workers) as _bsc_pool:
             _bsc_bf = _bsc_pool.submit(_bsc_banner.scan_video, _bsc_clip, 1.0) if _bsc_banner else None
             _bsc_cf = _bsc_pool.submit(_bsc_clock.scan_video,  _bsc_clip)      if _bsc_clock  else None
             # VS screen only appears in the first few minutes of a recording;
@@ -1233,12 +1235,12 @@ def run_pipeline(
     # the scans run in a background thread concurrently with the build. They
     # overlap into a single wall-clock block, so one combined header is logged
     # here; results are collected (and logged/saved) after build_reel returns.
-    # max_workers=2: the two scans run concurrently (and still overlap the
-    # reel build). On the 8 GB server this was 1 to hold only one extra video
-    # decoder in memory; a beefier local machine can afford both at once.
+    # max_workers=1: the two scans run sequentially but still fully overlap the
+    # reel build, while holding only one extra video decoder in memory.
+    # --local (NHL_LOCAL=1) lifts this to 2 so both scans run concurrently.
     from concurrent.futures import ThreadPoolExecutor as _StatsPool
     logger.info("━━━  Step 6: Building reel + stats/star scan (concurrent)  ━━━")
-    _stats_pool = _StatsPool(max_workers=2)
+    _stats_pool = _StatsPool(max_workers=2 if os.environ.get("NHL_LOCAL") == "1" else 1)
     _stats_future = _stats_pool.submit(
         lambda: [detect_stats_screens(clip) for clip in normalised]
     )
@@ -1468,7 +1470,17 @@ def main():
                    help="Demoted no-banner goals at/above this become scoring chances")
     p.add_argument("--smoke-test", action="store_true",
                    help="Verify imports, external binaries and required assets, then exit")
+    p.add_argument("--local", action="store_true",
+                   help="Local mode: use boosted thread/worker counts suited to a "
+                        "beefy local machine (defaults are tuned for the 8 GB server). "
+                        "Sets NHL_LOCAL=1 for all detection stages.")
     args = p.parse_args()
+
+    # Propagate boosted-parallelism mode to every stage via the environment so
+    # the detectors (classifier, banner) and the scan/stats pools all agree.
+    if args.local:
+        os.environ["NHL_LOCAL"] = "1"
+        logger.info("Local mode enabled — boosted parallelism (NHL_LOCAL=1)")
 
     if args.smoke_test:
         raise SystemExit(run_smoke_test(checkpoint=args.checkpoint))
@@ -1476,7 +1488,7 @@ def main():
     if args.file:
         # Wrap the single file in a temp dir so the pipeline's ingest step
         # sees it as a one-file folder without touching the original.
-        import tempfile, os
+        import tempfile
         file_path = Path(args.file).resolve()
         tmp = tempfile.mkdtemp(prefix="pipeline_single_", dir='.')
         os.link(file_path, Path(tmp) / file_path.name)   # hardlink — instant, no extra disk

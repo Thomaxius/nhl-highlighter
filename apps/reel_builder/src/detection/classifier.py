@@ -172,12 +172,16 @@ class HighlightClassifier:
 
         Uses a ThreadPoolExecutor so frame decoding (OpenCV, GIL-released) and
         PyTorch CPU inference (also GIL-released) overlap across clips.
-        Workers are capped at 6 to avoid CPU oversubscription on inference.
+        Workers are capped at 3 to avoid CPU oversubscription on inference;
+        --local mode (NHL_LOCAL=1) raises the cap to 6 and uses all cores.
         """
         import os
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        workers = min(6, max(1, os.cpu_count() or 2))
+        if os.environ.get("NHL_LOCAL") == "1":
+            workers = min(6, max(1, os.cpu_count() or 2))
+        else:
+            workers = min(3, max(1, (os.cpu_count() or 2) // 2))
 
         def _run(path):
             logger.info("Classifying: %s", Path(path).name)
