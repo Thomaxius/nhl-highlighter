@@ -318,9 +318,23 @@ def _audio_peak_time(video_path) -> float | None:
     crowd reaction). Returns None if the audio can't be read or is silent.
     """
     try:
+        import subprocess
         import librosa
         import numpy as np
-        y, sr = librosa.load(str(video_path), sr=None, mono=True)
+        # Decode audio with ffmpeg directly into a float32 array. librosa.load()
+        # would route .mp4 through soundfile (which can't read it) and fall back
+        # to audioread — deprecated in librosa 0.10 and removed in 1.0, and the
+        # source of the noisy "PySoundFile failed" warnings. ffmpeg is already a
+        # hard dependency, so pipe raw mono PCM and let librosa do only the math.
+        sr = 22050
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(video_path),
+             "-map", "a:0?", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"],
+            capture_output=True,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        y = np.frombuffer(proc.stdout, dtype=np.float32)
         if y.size == 0:
             return None
         hop = 512
