@@ -111,11 +111,10 @@ fi
 
 # ── 5. Download that run's segments ─────────────────────────────────────────
 REMOTE_SEG="$REMOTE_BASE/apps/shared/data/processed/segments/$STEM"
+# Escape spaces so the remote shell receives the path as a single argument.
+REMOTE_SEG_ESC="${REMOTE_SEG// /\\ }"
 mkdir -p "$SEG_LOCAL"
 echo
 echo "==> Downloading segments for: $STEM"
-# Modern scp uses the SFTP protocol and takes the remote path literally, so we
-# pass the path with its spaces intact (double-quoted for the LOCAL shell only)
-# — adding remote-shell quotes here would become part of the filename.
-scp -r ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$SERVER:$REMOTE_SEG" "$SEG_LOCAL/"
+scp -r ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$SERVER:$REMOTE_SEG_ESC" "$SEG_LOCAL/"
 echo "Done → $SEG_LOCAL/$STEM"
