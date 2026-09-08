@@ -877,8 +877,15 @@ def run_pipeline(
                             # Carry the template's declared period (if any) so the
                             # numbering pass can advance monotonically by template
                             # rather than blindly +1 on every (possibly false) hit.
+                            # Several period_start events can land on one segment
+                            # (e.g. a 3rd-period puck-drop where the 2nd-period
+                            # template also matched a frame later) — keep the
+                            # HIGHEST declared period so a lower stray match can't
+                            # overwrite the real one.
                             if ev.get("period") is not None:
-                                seg["clock_period"] = ev["period"]
+                                seg["clock_period"] = max(
+                                    seg.get("clock_period", 0), int(ev["period"])
+                                )
                             logger.info(
                                 "%s at t=%.1fs → %s",
                                 ev_type, ev_t, Path(seg["path"]).name,
@@ -1259,9 +1266,9 @@ def run_pipeline(
     # Build the set of period numbers whose boundaries were confirmed by the
     # clock detector.  Only transitions to confirmed periods are injected.
     confirmed_period_boundaries: set[int] = set()
-    _OT_HIGHLIGHT_LABELS = {"goal", "celebration", "goal_replay", "other_replay", "scoring_chance"}
-    _OT_MIN_HIGHLIGHTS = 5  # how many real OT highlights it takes to confirm OT
-    _ot_highlight_count = 0
+    _OT_MIN_CHANCES = 2  # standalone OT scoring chances needed to confirm OT (no goal/clock)
+    _ot_goal_count = 0    # fresh goals scored in OT (banner or faceoff-inferred)
+    _ot_chance_count = 0  # standalone scoring chances in OT (not chained to a pre-OT goal)
     _ot_clock_signal = False
     for _r in results:
         if _r.get("period_end"):
@@ -1269,34 +1276,37 @@ def run_pipeline(
         if _r.get("period_start") or _r.get("game_start"):
             confirmed_period_boundaries.add(_r.get("period_number", 1))
         # ── Overtime evidence ────────────────────────────────────────────────
-        # regulation_end alone just means the 3rd period ended — the game may be
-        # over, with only post-game menu/stats screens after it, so injecting an
-        # OT transition off a single (mis)classified menu frame is wrong.
-        # Treat OT as real only if EITHER the clock detector actually saw an OT
-        # period (ot_period_end), OR there are several genuine OT highlights.
+        # `regulation_end` alone just means the 3rd period ended — the game is
+        # usually over, with only post-game menu/stats screens after it. And the
+        # replay/celebration tail of a last-minute 3rd-period goal bleeds PAST
+        # the buzzer into period-4-numbered segments, so counting those as "OT
+        # highlights" falsely confirms overtime. Require a genuine fresh scoring
+        # event in OT (its own banner / faceoff inference), or a confirmed OT
+        # clock buzzer — never a bare replay/celebration/menu frame.
         if _r.get("ot_period_end"):
             _ot_clock_signal = True
-        if (_r.get("period_number", 1) >= 4
-                and _r.get("label") in _OT_HIGHLIGHT_LABELS
-                and not _r.get("game_end")
-                and not _r.get("regulation_end")
-                and not _r.get("has_menu")):
-            _ot_highlight_count += 1
+        if _r.get("period_number", 1) >= 4 and not _r.get("game_end") and not _r.get("regulation_end"):
+            _chained = _r.get("chain_goal_idx") is not None or _r.get("chain_sc_idx") is not None
+            if _r.get("label") == "goal" and (_r.get("banner_detected") or _r.get("inferred_goal")):
+                _ot_goal_count += 1
+            elif _r.get("label") == "scoring_chance" and not _chained:
+                _ot_chance_count += 1
 
     # Confirm every OT period present only when the evidence clears the bar.
     _ot_periods = {_r.get("period_number", 1) for _r in results if _r.get("period_number", 1) >= 4}
     if _ot_periods:
-        if _ot_clock_signal or _ot_highlight_count >= _OT_MIN_HIGHLIGHTS:
+        _ot_real = _ot_clock_signal or _ot_goal_count >= 1 or _ot_chance_count >= _OT_MIN_CHANCES
+        if _ot_real:
             confirmed_period_boundaries.update(_ot_periods)
             logger.info(
-                "  Overtime confirmed (clock_signal=%s, ot_highlights=%d) — periods %s",
-                _ot_clock_signal, _ot_highlight_count, sorted(_ot_periods),
+                "  Overtime confirmed (clock_signal=%s, ot_goals=%d, ot_chances=%d) — periods %s",
+                _ot_clock_signal, _ot_goal_count, _ot_chance_count, sorted(_ot_periods),
             )
         else:
             logger.info(
-                "  Overtime NOT confirmed (clock_signal=%s, ot_highlights=%d < %d) — "
-                "skipping OT transition (likely post-game menu footage).",
-                _ot_clock_signal, _ot_highlight_count, _OT_MIN_HIGHLIGHTS,
+                "  Overtime NOT confirmed (clock_signal=%s, ot_goals=%d, ot_chances=%d) — "
+                "skipping OT transition (likely post-game menu / post-buzzer replay footage).",
+                _ot_clock_signal, _ot_goal_count, _ot_chance_count,
             )
 
     if confirmed_period_boundaries:

@@ -246,19 +246,29 @@ class GameClockDetector:
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
             if event and event not in _TERMINAL:
-                # Apply a stricter confidence gate for period_end to suppress
-                # false positives from scoreboard/overlay noise mid-period.
-                if event == "period_end" and gate_conf < self.min_period_end_conf:
+                # Apply a stricter confidence gate for the events that move the
+                # period counter (period_end, period_start) or confirm overtime
+                # (ot_period_end) — an OCR coincidence on scoreboard/overlay noise
+                # must not advance or fork the game state.
+                _conf_gate = {
+                    "period_end":    self.min_period_end_conf,
+                    "period_start":  self.min_period_start_conf,
+                    "ot_period_end": self.min_game_end_conf,
+                }.get(event)
+                if _conf_gate is not None and gate_conf < _conf_gate:
                     logger.info(
-                        "  Skipping low-conf period_end (gate_conf=%.2f < %.2f): %s (%.1fs)  OCR=%r",
-                        gate_conf, self.min_period_end_conf, self._fmt_t(i / fps), i / fps, clock_str,
+                        "  Skipping low-conf %s (gate_conf=%.2f < %.2f): %s (%.1fs)  OCR=%r",
+                        event, gate_conf, _conf_gate,
+                        self._fmt_t(i / fps), i / fps, clock_str,
                     )
                     continue
                 t = i / fps
-                # For period_end, additionally require a dense rescan of ±window
-                # seconds to confirm the clock is genuinely near zero — not a
-                # one-off OCR coincidence on a scoreboard overlay.
-                if event == "period_end" and not self._confirm_period_end(cap, fps, t):
+                # For period_end / ot_period_end, additionally require a dense
+                # rescan of ±window seconds to confirm the clock is genuinely near
+                # zero — not a one-off OCR coincidence on a scoreboard overlay.
+                if event in ("period_end", "ot_period_end") and not self._confirm_period_end(
+                    cap, fps, t, accept={event},
+                ):
                     continue
                 logger.info(
                     "  Clock event: %s (%.1fs)  OCR=%r  event=%s  gate_conf=%.2f",
@@ -271,20 +281,29 @@ class GameClockDetector:
             # near-zero end-of-game template, so the OCR gate above rarely
             # fires on them.  Check each period-start template directly.
             if self._period_start_templates:
+                # Evaluate EVERY period-start template on this frame and keep only
+                # the single best match. The 2nd- and 3rd-period clock crops differ
+                # by just the tiny "2ND"/"3RD" glyph, so at a real 3rd-period
+                # puck-drop the 2nd-period template also scores above threshold —
+                # taking the first-above-threshold (lowest period) instead of the
+                # highest-confidence one would misdeclare the period.
+                best = None  # (conf, period_num, ev_type)
                 for period_num, ev_type, pt in self._period_start_templates:
                     conf = self._match_period_start_template(frame, pt)
-                    if conf >= self.min_period_start_conf:
-                        t = i / fps
-                        logger.info(
-                            "  Period-start template match: period=%d  event=%s  conf=%.2f  %s (%.1fs)",
-                            period_num, ev_type, conf, self._fmt_t(t), t,
-                        )
-                        # Carry the template's declared period so the pipeline
-                        # can number periods by the matched template (monotonic)
-                        # rather than blindly incrementing on every hit — a single
-                        # false duplicate would otherwise over-advance the counter.
-                        raw_events.append({"time_s": t, "event": ev_type, "period": period_num})
-                        break  # only fire the highest-confidence match per frame
+                    if conf >= self.min_period_start_conf and (best is None or conf > best[0]):
+                        best = (conf, period_num, ev_type)
+                if best is not None:
+                    conf, period_num, ev_type = best
+                    t = i / fps
+                    logger.info(
+                        "  Period-start template match: period=%d  event=%s  conf=%.2f  %s (%.1fs)",
+                        period_num, ev_type, conf, self._fmt_t(t), t,
+                    )
+                    # Carry the template's declared period so the pipeline can
+                    # number periods by the matched template (monotonic) rather
+                    # than blindly incrementing on every hit — a single false
+                    # duplicate would otherwise over-advance the counter.
+                    raw_events.append({"time_s": t, "event": ev_type, "period": period_num})
         cap.release()
 
         # Merge consecutive detections of the same event type
@@ -302,15 +321,18 @@ class GameClockDetector:
         cap: cv2.VideoCapture,
         fps: float,
         candidate_s: float,
+        accept: set[str] | None = None,
     ) -> bool:
         """
         Dense rescan of ±period_end_confirm_window_s around *candidate_s*.
 
         Returns True only if ≥ period_end_confirm_min_hits frames within that
-        window independently confirm a near-zero clock with gate_conf ≥
+        window independently confirm a near-zero clock (classified as one of
+        *accept*, default ``{"period_end"}``) with gate_conf ≥
         min_period_end_conf.  A genuine period end will produce many such
         frames; a one-off OCR coincidence almost never repeats within 10s.
         """
+        accept = accept or {"period_end"}
         window   = self.period_end_confirm_window_s
         min_hits = self.period_end_confirm_min_hits
         interval = self.period_end_confirm_interval_s
@@ -328,18 +350,19 @@ class GameClockDetector:
                 continue
             clock_str = self._ocr_clock(frame)
             event     = self._classify_clock(clock_str)
-            if event == "period_end":
+            if event in accept:
                 hits += 1
                 if hits >= min_hits:
                     logger.info(
-                        "  period_end confirmed: %d hits in [%s, %s]",
-                        hits, self._fmt_t(t0), self._fmt_t(t1),
+                        "  %s confirmed: %d hits in [%s, %s]",
+                        "/".join(sorted(accept)), hits, self._fmt_t(t0), self._fmt_t(t1),
                     )
                     return True
         logger.info(
-            "  period_end NOT confirmed: %d/%d hits in [%s, %s] "
+            "  %s NOT confirmed: %d/%d hits in [%s, %s] "
             "\u2014 dropping candidate at %s",
-            hits, min_hits, self._fmt_t(t0), self._fmt_t(t1), self._fmt_t(candidate_s),
+            "/".join(sorted(accept)), hits, min_hits,
+            self._fmt_t(t0), self._fmt_t(t1), self._fmt_t(candidate_s),
         )
         return False
 

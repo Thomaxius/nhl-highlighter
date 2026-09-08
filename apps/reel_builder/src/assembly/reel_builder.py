@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 import subprocess
 import logging
+import re
 import tempfile
 
 logger = logging.getLogger(__name__)
@@ -238,11 +239,14 @@ def build_reel(
         len(goal_highlights), len(other_highlights[:remaining_cap]), int(bool(game_end_segs)),
     )
 
+    timeline_snapshot: list[tuple[list[dict], float]] = []
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
         # Step 1: Process each group — goal sequences become ONE rolling clip
         processed_clips: list[Path] = []
+        clip_groups: list[list[dict]] = []  # groups that actually produced a clip
         for group_idx, group in enumerate(selected_groups):
             lead = group[0]
 
@@ -367,6 +371,7 @@ def build_reel(
                 import shutil as _shutil
                 _shutil.copy2(src, dst)
             processed_clips.append(dst)
+            clip_groups.append(group)
 
         # Step 2: Fade in only the first clip and fade out only the last clip.
         # Internal transitions are hard cuts so there are no black flashes between
@@ -393,6 +398,9 @@ def build_reel(
         # fails, this pinpoints the offending clip (missing audio, wrong fps,
         # video/audio length divergence) without needing to re-run.
         _log_clips_debug(faded_clips, "final concat")
+        # Snapshot each clip's real duration now — the temp files vanish when this
+        # `with` block exits, and the timeline writer runs after that.
+        timeline_snapshot = list(zip(clip_groups, [(_probe_duration(c) or 0.0) for c in faded_clips]))
         _ffmpeg_concat_final(concat_list, concat_out)
 
         # Step 4: Mix in background music (optional)
@@ -404,6 +412,12 @@ def build_reel(
 
     # Safety net: enforce a hard maximum duration on the final reel.
     _enforce_max_duration(output_path, MAX_REEL_DURATION_S)
+
+    # Write a human-readable + JSON timeline of what each stretch of the reel is.
+    try:
+        _write_reel_timeline(timeline_snapshot, output_path)
+    except Exception as exc:  # never let a reporting bug fail the build
+        logger.warning("Could not write reel timeline: %s", exc)
 
     logger.info("Reel saved → %s", output_path)
     return output_path
@@ -688,6 +702,98 @@ def _log_clips_debug(clips: list[Path], stage: str) -> None:
     logger.info("[concat-debug] %s — %d clip(s):", stage, len(clips))
     for i, c in enumerate(clips):
         logger.info("[concat-debug]   [%02d] %s", i, _probe_clip_debug(c))
+
+
+def _scene_label(seg: dict) -> str:
+    """`…_norm-scene-082.mp4` → `082`; falls back to the file stem."""
+    stem = Path(seg.get("path", "")).stem
+    m = re.search(r"scene-(\d+)", stem)
+    return m.group(1) if m else stem
+
+
+def _describe_group(group: list[dict]) -> tuple[str, str]:
+    """Return ``(kind, detail)`` for a reel group — mirrors the branch logic in
+    the processing loop so the timeline names each stretch the way it was built."""
+    lead = group[0]
+    if lead.get("period_transition"):
+        to_p = lead.get("to_period")
+        name = {2: "2ND PERIOD", 3: "3RD PERIOD"}.get(to_p, "OVERTIME")
+        return "transition", name
+    if lead.get("intro"):
+        return "intro", "VS screen → opening faceoff"
+    if lead.get("game_end"):
+        return "game_end", "final buzzer / scoreboard"
+    if lead.get("regulation_end"):
+        return "end_of_regulation", "3rd-period buzzer"
+    if lead.get("banner_detected"):
+        return "goal", "banner-confirmed"
+    if lead.get("inferred_goal"):
+        return "goal", "faceoff-pattern inferred"
+    label = lead.get("label", "highlight")
+    return label, ""
+
+
+def _write_reel_timeline(
+    groups_and_durations: list[tuple[list[dict], float]],
+    output_path: Path,
+) -> None:
+    """
+    Write ``<reel>.timeline.txt`` (+ ``.timeline.json``) listing every stretch of
+    the finished reel: its start–end timecode, what it was classified as, which
+    period it belongs to, and the source scene(s) it came from.
+    """
+    import json
+
+    def _tc(t: float) -> str:
+        m, s = divmod(int(round(t)), 60)
+        return f"{m:02d}:{s:02d}"
+
+    rows: list[dict] = []
+    cursor = 0.0
+    for grp, dur in groups_and_durations:
+        lead = grp[0]
+        kind, detail = _describe_group(grp)
+        scenes = [_scene_label(s) for s in grp if s.get("path")]
+        rows.append({
+            "start_s": round(cursor, 2),
+            "end_s": round(cursor + dur, 2),
+            "start_tc": _tc(cursor),
+            "end_tc": _tc(cursor + dur),
+            "duration_s": round(dur, 2),
+            "kind": kind,
+            "detail": detail,
+            "period": lead.get("period_number"),
+            "confidence": (round(lead["confidence"], 2)
+                           if isinstance(lead.get("confidence"), (int, float)) else None),
+            "scenes": scenes,
+        })
+        cursor += dur
+
+    json_path = output_path.parent / f"{output_path.stem}.timeline.json"
+    json_path.write_text(json.dumps({"reel": output_path.name, "total_s": round(cursor, 2),
+                                     "segments": rows}, indent=2))
+
+    lines = [
+        f"Timeline for {output_path.name}",
+        f"Total: {_tc(cursor)}  ({len(rows)} segments)",
+        "",
+        f"{'START':>7}  {'END':>7}  {'DUR':>6}  {'PER':>3}  KIND / SOURCE",
+        "-" * 64,
+    ]
+    for r in rows:
+        per = f"P{r['period']}" if r["period"] else " · "
+        desc = r["kind"] + (f" ({r['detail']})" if r["detail"] else "")
+        if r["confidence"] is not None and r["kind"] not in ("intro", "transition",
+                                                             "game_end", "end_of_regulation"):
+            desc += f"  conf={r['confidence']:.0%}"
+        src = f"  scene {r['scenes'][0]}" if len(r["scenes"]) == 1 else (
+            f"  scenes {r['scenes'][0]}–{r['scenes'][-1]}" if r["scenes"] else "")
+        lines.append(
+            f"{r['start_tc']:>7}  {r['end_tc']:>7}  {r['duration_s']:>5.1f}s  {per:>3}  {desc}{src}"
+        )
+    txt_path = output_path.parent / f"{output_path.stem}.timeline.txt"
+    txt_path.write_text("\n".join(lines) + "\n")
+    logger.info("Reel timeline → %s", txt_path)
 
 
 def _enforce_max_duration(output: Path, max_seconds: int) -> None:
