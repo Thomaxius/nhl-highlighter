@@ -390,18 +390,27 @@ def _trim_chance_clips(
         if dur <= min_trim_len_s:
             continue
         peak = _audio_peak_time(seg["path"])
-        if peak is None:
+        if peak is not None:
+            start = max(0.0, peak - pre_s)
+            end = min(dur, peak + post_s)
+            anchor = f"audio peak {peak:.1f}s"
+        elif seg.get("window_start_s") is not None:
+            # No audio spike (common — the game only spikes on goals), but the
+            # classifier's winning window says where the action was. Use it so a
+            # rescued 30s scene doesn't play in full.
+            start = max(0.0, seg["window_start_s"] - pre_s)
+            end = min(dur, seg.get("window_end_s", seg["window_start_s"] + 4.0) + post_s)
+            anchor = f"ml window {seg['window_start_s']:.1f}s"
+        else:
             continue
-        start = max(0.0, peak - pre_s)
-        end = min(dur, peak + post_s)
         if end - start < 2.0:
             continue
         seg["trim_start_s"] = start
         seg["trim_end_s"] = end
         logger.info(
-            "  Trimmed %s to [%.1f–%.1fs] around audio peak %.1fs: %s",
+            "  Trimmed %s to [%.1f–%.1fs] around %s: %s",
             "inferred goal" if is_inferred else "scoring_chance",
-            start, end, peak, Path(seg["path"]).name,
+            start, end, anchor, Path(seg["path"]).name,
         )
         trimmed += 1
     if trimmed:
