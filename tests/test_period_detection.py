@@ -119,18 +119,28 @@ def _frame_at(seconds):
     return frame
 
 
-def test_fixture_still_exercises_the_period_template_ambiguity():
-    """The tie-break fix only bites while both the 2nd- and 3rd-period clock
-    templates clear the gate on the mid-3rd frame and the 3rd scores at least as
-    high. If a template is re-cut and that stops holding, this fixture no longer
-    guards the regression — fail loudly so it gets refreshed."""
+def test_real_puck_drop_still_matches_and_reads_as_third_period():
+    """Window C is the genuine 3rd-period puck drop (20:00 / 3RD). Both the 2nd-
+    and 3rd-period clock templates score high on it (they differ by one glyph);
+    the 3rd must win the tie-break and clear the confidence gate."""
     det = _detector()
-    frame = _frame_at(74)  # window D — mid-3rd, source ~1078 s
+    frame = _frame_at(50)  # window C — real 3rd puck drop, source ~924 s
     scores = {p: det._match_period_start_template(frame, tmpl)
               for p, _ev, tmpl in det._period_start_templates}
-    assert scores[2] >= det.min_period_start_conf, scores
     assert scores[3] >= det.min_period_start_conf, scores
     assert scores[3] >= scores[2], scores
+
+
+def test_mid_period_clock_template_hit_is_rejected():
+    """The clock-only crop keeps matching the digit region mid-period (~0.85–0.91
+    on a 10:29 clock). Such a hit must not become a period_start — it fails the
+    raised confidence gate, and the OCR ("10:29") is a mid-period reading."""
+    det = _detector()
+    frame = _frame_at(74)  # window D — mid-3rd, source ~1078 s
+    best = max(det._match_period_start_template(frame, t)
+              for _p, _e, t in det._period_start_templates)
+    ocr_mid = det._ocr_clock_is_mid_period(det._ocr_clock(frame))
+    assert best < det.min_period_start_conf or ocr_mid, (best, ocr_mid)
 
 
 def test_ocr_only_period_start_is_below_the_confidence_gate():

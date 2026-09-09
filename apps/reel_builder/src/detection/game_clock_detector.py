@@ -292,6 +292,19 @@ class GameClockDetector:
                     conf = self._match_period_start_template(frame, pt)
                     if conf >= self.min_period_start_conf and (best is None or conf > best[0]):
                         best = (conf, period_num, ev_type)
+                # The clock-only crop matches the digit region loosely, so it
+                # keeps hitting ~0.85–0.91 all through a period (e.g. on a 10:29
+                # clock). A real puck drop hits ~0.96+ AND the clock reads 20:00.
+                # Drop a match when the OCR is a confident mid-period time and
+                # _classify_clock didn't independently call it a start.
+                if (best is not None
+                        and event not in ("period_start", "game_start")
+                        and self._ocr_clock_is_mid_period(clock_str)):
+                    logger.info(
+                        "  Skipping period-start template match (conf=%.2f) — OCR clock %r is mid-period: %s (%.1fs)",
+                        best[0], clock_str.replace("\n", " "), self._fmt_t(i / fps), i / fps,
+                    )
+                    best = None
                 if best is not None:
                     conf, period_num, ev_type = best
                     t = i / fps
@@ -581,6 +594,32 @@ class GameClockDetector:
 
         # Period label not readable — ignore rather than assume game_end
         return None
+
+    @staticmethod
+    def _ocr_clock_is_mid_period(clock_str: str) -> bool:
+        """
+        True when *clock_str* is a confident clock reading that is NOT a fresh
+        20:00 period start — e.g. ``"10:29"``, ``"6:56"``.
+
+        A period always starts at 20:00, so a period-start template match on a
+        frame whose clock clearly reads 0–19 minutes is a false positive.
+        Garbage / empty / label-only OCR returns False so the match falls back
+        to its template confidence.
+        """
+        head = clock_str.strip().splitlines()[0] if clock_str.strip() else ""
+        if ":" not in head and "." not in head:
+            return False
+        nums = re.findall(r"\d+", head)
+        if len(nums) < 2:
+            return False
+        try:
+            mins, secs = int(nums[0]), int(nums[1])
+        except ValueError:
+            return False
+        if 0 <= mins <= 19:
+            return True
+        # 20:xx well past the drop (the clock is only at 20:00 for one tick).
+        return mins == 20 and secs > 5
 
     @staticmethod
     def _merge_events(events: list[dict], gap_s: float) -> list[dict]:
