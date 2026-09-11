@@ -362,17 +362,22 @@ def _trim_chance_clips(
     min_trim_len_s: float = 12.0,
 ) -> list[dict]:
     """Trim scoring-chance AND faceoff-inferred-goal leads to a window around
-    their loudest moment.
+    the action.
 
     Banner goals are anchored to the GOAL banner and trimmed tight; scoring
     chances and *inferred* goals have no banner anchor, so their full ~45s scene
     would otherwise play in full (a weak faceoff-pattern inference is usually
-    just a chance). Anchor on the audio peak (the shot/save) and keep
-    [peak-pre, peak+post]. The reel builder applies this window to the lead clip
-    only — chained celebration/replays still follow. Banner goals are never
-    touched here (they roll naturally to the scene end). Clips already shorter
-    than min_trim_len_s, already carrying a trim window, or with no detectable
-    audio peak are left as-is.
+    just a chance).
+
+    Prefer the classifier's own winning window (window_start_s/window_end_s,
+    set by _classify_windowed on every windowed clip) — it's the exact ~4s
+    stretch the model flagged as chance-like. The audio peak (loudest RMS frame
+    in the WHOLE clip) is only a fallback for clips with no window info: on a
+    scoring chance the loudest moment is frequently commentary, a hit, or crowd
+    noise from an unrelated stretch of play rather than the shot/save itself,
+    so trusting it over the model's own localisation was cutting the reel clip
+    to the wrong few seconds. Clips already shorter than min_trim_len_s or
+    already carrying a trim window are left as-is.
     """
     trimmed = 0
     for seg in results:
@@ -389,20 +394,17 @@ def _trim_chance_clips(
         dur = _get_clip_duration(seg["path"])
         if dur <= min_trim_len_s:
             continue
-        peak = _audio_peak_time(seg["path"])
-        if peak is not None:
-            start = max(0.0, peak - pre_s)
-            end = min(dur, peak + post_s)
-            anchor = f"audio peak {peak:.1f}s"
-        elif seg.get("window_start_s") is not None:
-            # No audio spike (common — the game only spikes on goals), but the
-            # classifier's winning window says where the action was. Use it so a
-            # rescued 30s scene doesn't play in full.
+        if seg.get("window_start_s") is not None:
             start = max(0.0, seg["window_start_s"] - pre_s)
             end = min(dur, seg.get("window_end_s", seg["window_start_s"] + 4.0) + post_s)
             anchor = f"ml window {seg['window_start_s']:.1f}s"
         else:
-            continue
+            peak = _audio_peak_time(seg["path"])
+            if peak is None:
+                continue
+            start = max(0.0, peak - pre_s)
+            end = min(dur, peak + post_s)
+            anchor = f"audio peak {peak:.1f}s"
         if end - start < 2.0:
             continue
         seg["trim_start_s"] = start

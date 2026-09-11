@@ -122,14 +122,33 @@ def build_reel(
             groups.append(group)
         elif seg.get("label") == "scoring_chance":
             # Start a scoring chance group and pull any chained replay along
-            group = [seg]
             used_ids.add(id(seg))
+            chained: list[dict] = []
             for j in range(i + 1, min(i + 10, len(segments))):
                 follow = segments[j]
                 if follow.get("chain_sc_idx") == i:
-                    group.append(follow)
+                    chained.append(follow)
                     used_ids.add(id(follow))
-            groups.append(group)
+
+            # Multi-peak: one physical scene can hold several distinct chances.
+            # The classifier anchors the primary trim on `seg` and hands back
+            # any further time-clusters in `sc_extra_windows`; emit each as its
+            # own clip in chronological order, with the chained replay (if any)
+            # following the last one.
+            leads = [seg]
+            for w in seg.get("sc_extra_windows") or []:
+                if w.get("confidence", 0.0) < sc_min_confidence:
+                    continue
+                extra_lead = dict(seg)
+                extra_lead["trim_start_s"] = w["trim_start_s"]
+                extra_lead["trim_end_s"]   = w["trim_end_s"]
+                extra_lead["confidence"]   = w.get("confidence", seg.get("confidence", 0.0))
+                extra_lead.pop("sc_extra_windows", None)
+                leads.append(extra_lead)
+
+            for k, lead in enumerate(leads):
+                is_last = (k == len(leads) - 1)
+                groups.append([lead] + (chained if is_last else []))
         elif seg.get("label") in {"celebration", "goal_replay", "other_replay"}:
             # Never include celebration/replay unless chained to a goal or scoring chance — skip
             used_ids.add(id(seg))

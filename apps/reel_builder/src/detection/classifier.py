@@ -50,6 +50,19 @@ class HighlightClassifier:
     WINDOW_SIZE_S      = 4.0   # match typical training clip length
     WINDOW_STRIDE_S    = 2.0   # 50 % overlap
 
+    # Multi-peak windowing: a long scene can hold more than one scoring chance,
+    # and the chance that scored highest is not always the one the viewer cares
+    # about (a quiet breakaway loses to a louder scrum later in the same 30s
+    # scene). Collect every window that agrees with the winning label and clears
+    # one of these gates, merge them into time-clusters, and emit one trim per
+    # cluster instead of a single winner.
+    PEAK_MIN_CONF      = 0.45   # a window counts as a peak at/above this confidence…
+    PEAK_REL_MARGIN    = 0.20   # …or within this margin of the best window
+    PEAK_CLUSTER_GAP_S = 4.0    # peaks closer than this in time merge into one clip
+    PEAK_MAX_EXTRA     = 2      # cap on extra clips emitted from one scene
+    SC_PRE_S           = 7.0    # scoring-chance lead-in kept before the peak
+    SC_POST_S          = 3.0    # …and tail kept after it
+
     def classify_segment(self, video_path: str | Path) -> dict:
         """
         Classify a single video segment.
@@ -93,9 +106,16 @@ class HighlightClassifier:
 
     def _classify_windowed(self, video_path: Path, fps: float, total_frames: int, duration_s: float) -> dict:
         """
-        Slide a fixed-length window over a long clip and return the prediction
-        with the highest non-other confidence.  Falls back to the best overall
-        prediction if every window confidently says 'other'.
+        Slide a fixed-length window over a long clip. The headline label is the
+        single most-confident non-other window; falls back to the best 'other'
+        window if nothing else fires.
+
+        For a scoring chance, the trim is not anchored on that top window —
+        instead every window sharing the winning label is clustered by time
+        (see the PEAK_* constants) and the EARLIEST cluster becomes the primary
+        clip, because a chance builds at its first shot and the rest is
+        aftermath. Any further clusters are attached as ``sc_extra_windows`` so
+        the reel builder can emit them as their own clips.
         """
         import cv2 as _cv2
 
@@ -105,9 +125,8 @@ class HighlightClassifier:
 
         cap = _cv2.VideoCapture(str(video_path))
 
-        best_result = None         # best non-other result
+        windows: list[dict] = []   # every non-other window, in time order
         best_other_result = None   # fallback if every window says other
-        best_window_start_s = 0.0  # absolute start time (s) of the winning window
 
         start = 0
         while start < total_frames:
@@ -125,13 +144,12 @@ class HighlightClassifier:
 
             if len(frames) == self.num_frames:
                 result = self._classify_frames(video_path, frames)
+                result["window_start_s"] = window_start_s
+                result["window_end_s"]   = min(duration_s, window_start_s + self.WINDOW_SIZE_S)
                 if result["label"] != "other":
-                    if best_result is None or result["confidence"] > best_result["confidence"]:
-                        best_result = result
-                        best_window_start_s = window_start_s
-                else:
-                    if best_other_result is None or result["confidence"] > best_other_result["confidence"]:
-                        best_other_result = result
+                    windows.append(result)
+                elif best_other_result is None or result["confidence"] > best_other_result["confidence"]:
+                    best_other_result = result
 
             if end >= total_frames:
                 break
@@ -139,35 +157,89 @@ class HighlightClassifier:
 
         cap.release()
 
-        # TODO(multi-peak): instead of a single winner, collect all windows above a
-        # confidence threshold (e.g. 85%), deduplicate by proximity, and emit multiple
-        # trim ranges from one segment — so a 64s scene with 3 scoring chances surfaces
-        # all 3 clips instead of just the highest-confidence one.
-        winner = best_result if best_result is not None else best_other_result
-        if winner is None:
-            return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
+        if not windows:
+            if best_other_result is None:
+                return {"path": str(video_path), "label": "other", "confidence": 0.0, "scores": {}}
+            return best_other_result
 
-        SC_PRE_S  = 7.0
-        SC_POST_S = 3.0
-        if best_result is not None:
-            # Remember where the winning (non-other) window sat. For a
-            # scoring_chance this is the trim window straight away; for a
-            # banner-less 'goal' (which Step 4c demotes and Step 4f.5 may rescue
-            # as a chance) keep it around so the rescue can still trim to the
-            # action instead of playing the whole scene.
-            winner["window_start_s"] = best_window_start_s
-            winner["window_end_s"]   = min(duration_s, best_window_start_s + self.WINDOW_SIZE_S)
-            if winner["label"] == "scoring_chance":
-                winner["trim_start_s"] = max(0.0, best_window_start_s - SC_PRE_S)
-                winner["trim_end_s"]   = min(duration_s, best_window_start_s + self.WINDOW_SIZE_S + SC_POST_S)
-                logger.debug(
-                    "  SC trim: window at %.1fs → trim [%.1fs, %.1fs]",
-                    best_window_start_s, winner["trim_start_s"], winner["trim_end_s"],
-                )
+        # Headline label/confidence: the single most confident non-other window.
+        best = max(windows, key=lambda w: w["confidence"])
+        winner = dict(best)
+
+        # ── Cluster every window that agrees with the winning label ──────────
+        # A goal-mouth scramble flickers between 'goal' and 'scoring_chance'
+        # window to window — to the model they're the same crease-crowding
+        # phenomenon read at slightly different confidence, and a 'goal' winner
+        # is heading for exactly this fate itself (Step 4c demotes any
+        # banner-less goal, Step 4f.5 rescues it back as a scoring_chance). So
+        # when the winner isn't already scoring_chance, pool both labels when
+        # clustering — otherwise the climax can sit in a run of windows the
+        # model tagged scoring_chance and never join the 'goal' cluster the
+        # trim gets anchored on, cutting the reel clip before the shot.
+        peak_labels = {best["label"]} if best["label"] == "scoring_chance" else {best["label"], "scoring_chance"}
+        conf_gate = max(self.PEAK_MIN_CONF, best["confidence"] - self.PEAK_REL_MARGIN)
+        peaks = sorted(
+            (w for w in windows if w["label"] in peak_labels and w["confidence"] >= conf_gate),
+            key=lambda w: w["window_start_s"],
+        )
+        clusters: list[dict] = []
+        for w in peaks:
+            if clusters and w["window_start_s"] - clusters[-1]["end_s"] <= self.PEAK_CLUSTER_GAP_S:
+                clusters[-1]["end_s"]      = max(clusters[-1]["end_s"], w["window_end_s"])
+                clusters[-1]["confidence"] = max(clusters[-1]["confidence"], w["confidence"])
+            else:
+                clusters.append({
+                    "start_s": w["window_start_s"],
+                    "end_s": w["window_end_s"],
+                    "confidence": w["confidence"],
+                })
+        if not clusters:  # best window itself failed the gate (margin only) — use it
+            clusters = [{
+                "start_s": best["window_start_s"],
+                "end_s": best["window_end_s"],
+                "confidence": best["confidence"],
+            }]
+
+        # A scoring chance is anchored on its FIRST peak (the shot that started
+        # it); other labels keep the highest-confidence cluster.
+        if best["label"] == "scoring_chance":
+            primary, extra = clusters[0], clusters[1:]
+        else:
+            primary = max(clusters, key=lambda c: c["confidence"])
+            extra = [c for c in clusters if c is not primary]
+
+        winner["window_start_s"] = primary["start_s"]
+        winner["window_end_s"]   = primary["end_s"]
+
+        # Extra, temporally-separate peaks get attached regardless of the
+        # winning label — not only when the winner is already scoring_chance.
+        # A 'goal' winner here is routinely a banner-less false read that Step
+        # 4c demotes and Step 4f.5 rescues back to scoring_chance later in the
+        # pipeline, and a second, unrelated chance elsewhere in the same long
+        # scene (e.g. an early net-front scramble, then an unconnected shot 10s
+        # later) is exactly as real either way. Harmless for a segment that
+        # stays a genuine banner-confirmed goal or gets dropped as 'other' —
+        # the reel builder only reads this key off a segment whose final label
+        # is scoring_chance.
+        if extra:
+            winner["sc_extra_windows"] = [
+                {
+                    "trim_start_s": max(0.0, c["start_s"] - self.SC_PRE_S),
+                    "trim_end_s":   min(duration_s, c["end_s"] + self.SC_POST_S),
+                    "confidence":   c["confidence"],
+                }
+                for c in extra[: self.PEAK_MAX_EXTRA]
+            ]
+
+        if winner["label"] == "scoring_chance":
+            winner["trim_start_s"] = max(0.0, primary["start_s"] - self.SC_PRE_S)
+            winner["trim_end_s"]   = min(duration_s, primary["end_s"] + self.SC_POST_S)
 
         logger.debug(
-            "  Windowed inference: %s → %s (%.0f%%) over %.1fs",
-            video_path.name, winner["label"], winner["confidence"] * 100, duration_s,
+            "  Windowed inference: %s → %s (%.0f%%) over %.1fs  [%d peak(s), window %.1f-%.1fs%s]",
+            video_path.name, winner["label"], winner["confidence"] * 100, duration_s, len(clusters),
+            winner["window_start_s"], winner["window_end_s"],
+            f", +{len(winner['sc_extra_windows'])} extra" if extra else "",
         )
         return winner
 
