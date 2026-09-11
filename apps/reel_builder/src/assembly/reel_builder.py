@@ -352,13 +352,27 @@ def build_reel(
                 _loudnorm_audio(src_raw, src_normed)
                 src = src_normed if src_normed.exists() else src_raw
             elif lead.get("label") == "scoring_chance" and len(group) > 1:
-                # ── Scoring chance with chained replay: trim lead then concat ──
+                # ── Scoring chance with a chained follow-up: trim each part, concat ──
+                # A follow-on can be either a plain replay (chain_sc_idx from an
+                # earlier scan — always played in full, no trim keys) or another
+                # scoring-chance scene PySceneDetect split off mid-action
+                # (_chain_adjacent_scoring_chances), which carries its own
+                # trim_start_s/trim_end_s and must be trimmed just like the lead.
+                lead_src = Path(lead["path"])
                 if "trim_start_s" in lead and "trim_end_s" in lead:
                     trimmed_lead = tmp / f"group_{group_idx:03d}_sc_lead.mp4"
                     _ffmpeg_trim(lead_src, trimmed_lead, lead["trim_start_s"], lead["trim_end_s"])
                     if trimmed_lead.exists():
                         lead_src = trimmed_lead
-                parts = [lead_src] + [Path(s["path"]) for s in group[1:]]
+                parts = [lead_src]
+                for fi, follow in enumerate(group[1:]):
+                    fp = Path(follow["path"])
+                    if "trim_start_s" in follow and "trim_end_s" in follow:
+                        trimmed_follow = tmp / f"group_{group_idx:03d}_sc_follow_{fi}.mp4"
+                        _ffmpeg_trim(fp, trimmed_follow, follow["trim_start_s"], follow["trim_end_s"])
+                        if trimmed_follow.exists():
+                            fp = trimmed_follow
+                    parts.append(fp)
                 merged = tmp / f"group_{group_idx:03d}_sc_merged.mp4"
                 _merge_clip_parts(parts, merged, tmp, f"{group_idx:03d}")
                 src = merged

@@ -420,6 +420,61 @@ def _trim_chance_clips(
     return results
 
 
+def _chain_adjacent_scoring_chances(
+    results: list[dict],
+    max_gap_s: float = 3.0,
+    edge_tolerance_s: float = 0.5,
+) -> list[dict]:
+    """
+    Chain two scoring-chance clips into one continuous play when PySceneDetect
+    happened to cut mid-action — e.g. an "OFFSIDE" banner or other on-screen
+    graphic change triggers a scene cut right as a chance is developing.
+
+    Two scoring_chance segments are chained when BOTH edges say the cut split
+    one play in two: the earlier clip's kept portion runs to its own scene's
+    end (the action was still going when the scene stopped, not something the
+    trim window chose to end early) AND the later clip's kept portion starts
+    at its own scene's beginning (the payoff was already underway when its
+    scene starts). A short, unselected gap between the two scenes (a menu
+    frame, an intermission graphic, a fraction-of-a-second cut) is fine —
+    max_gap_s bounds it so two genuinely unrelated chances don't get merged.
+
+    Sets chain_sc_idx on the later segment so build_reel's scoring_chance
+    grouping (which already looks for it) picks it up; the reel builder trims
+    the follow-on clip to its own trim_start_s/trim_end_s rather than playing
+    it in full, the way a chained goal replay does.
+    """
+    _STRUCTURAL_FLAGS = (
+        "game_start", "period_start", "period_end", "regulation_end",
+        "game_end", "intro", "has_menu",
+    )
+    sc_indices = [i for i, r in enumerate(results) if r.get("label") == "scoring_chance"]
+    chained = 0
+    for a, b in zip(sc_indices, sc_indices[1:]):
+        seg_a, seg_b = results[a], results[b]
+        if seg_b.get("chain_sc_idx") is not None or any(seg_b.get(f) for f in _STRUCTURAL_FLAGS):
+            continue
+        dur_a = _get_clip_duration(seg_a["path"])
+        trim_end_a = seg_a.get("trim_end_s", dur_a)
+        if trim_end_a < dur_a - edge_tolerance_s:
+            continue  # seg_a's clip ends early on its own — not a mid-action cut
+        trim_start_b = seg_b.get("trim_start_s", 0.0)
+        if trim_start_b > edge_tolerance_s:
+            continue  # seg_b's payoff doesn't start at its own scene's beginning
+        gap = sum(_get_clip_duration(results[k]["path"]) for k in range(a + 1, b))
+        if gap > max_gap_s:
+            continue
+        seg_b["chain_sc_idx"] = a
+        chained += 1
+        logger.info(
+            "  Chained adjacent scoring chances (gap=%.1fs): %s → %s",
+            gap, Path(seg_a["path"]).name, Path(seg_b["path"]).name,
+        )
+    if chained:
+        logger.info("  Chained %d pair(s) of adjacent scoring chances.", chained)
+    return results
+
+
 def _infer_goals_from_faceoff_pattern(
     results: list[dict],
     max_lookahead: int = _CFG["goal_inference"]["max_lookahead"],
@@ -1240,6 +1295,10 @@ def run_pipeline(
     # ── Step 4f.6: Trim scoring chances + inferred goals to the action ───────
     logger.info("━━━  Step 4f.6: Trimming chance/inferred clips to audio peak  ━━━")
     results = _trim_chance_clips(results)
+
+    # ── Step 4f.7: Chain scoring chances PySceneDetect split mid-action ──────
+    logger.info("━━━  Step 4f.7: Chaining adjacent scoring chances  ━━━")
+    results = _chain_adjacent_scoring_chances(results)
 
     # ── Step 5: Score with audio boosts ──────────────────────────────────────
     logger.info("━━━  Step 5: Scoring  ━━━")
