@@ -61,7 +61,8 @@ class HighlightClassifier:
     PEAK_CLUSTER_GAP_S = 4.0    # peaks closer than this in time merge into one clip
     PEAK_MAX_EXTRA     = 2      # cap on extra clips emitted from one scene
     SC_PRE_S           = 7.0    # scoring-chance lead-in kept before the peak
-    SC_POST_S          = 3.0    # …and tail kept after it
+    SC_POST_S          = 5.0    # …and tail kept after it (a shot / save often lands
+                                 # just past the last confidently-classified window)
 
     def classify_segment(self, video_path: str | Path) -> dict:
         """
@@ -177,7 +178,14 @@ class HighlightClassifier:
         # model tagged scoring_chance and never join the 'goal' cluster the
         # trim gets anchored on, cutting the reel clip before the shot.
         peak_labels = {best["label"]} if best["label"] == "scoring_chance" else {best["label"], "scoring_chance"}
-        conf_gate = max(self.PEAK_MIN_CONF, best["confidence"] - self.PEAK_REL_MARGIN)
+        # "Or" means the LOWER of the two bars (min), not the higher one (max).
+        # max() made the gate *stricter* whenever the scene had one very
+        # confident window — backwards, since that's exactly when the quieter
+        # build-up/follow-through windows around the real peak most need the
+        # margin clause to let them in. (Confirmed against a real reel: a
+        # scoring-chance clip was ending a few seconds before the actual shot
+        # because the window that showed it fell just short of this gate.)
+        conf_gate = min(self.PEAK_MIN_CONF, best["confidence"] - self.PEAK_REL_MARGIN)
         peaks = sorted(
             (w for w in windows if w["label"] in peak_labels and w["confidence"] >= conf_gate),
             key=lambda w: w["window_start_s"],
