@@ -59,6 +59,7 @@ class HighlightClassifier:
     PEAK_MIN_CONF      = 0.45   # a window counts as a peak at/above this confidence…
     PEAK_REL_MARGIN    = 0.20   # …or within this margin of the best window
     PEAK_CLUSTER_GAP_S = 4.0    # peaks closer than this in time merge into one clip
+    PEAK_MAX_CLUSTER_S = 20.0   # a single cluster can't grow past this many seconds
     PEAK_MAX_EXTRA     = 2      # cap on extra clips emitted from one scene
     SC_PRE_S           = 7.0    # scoring-chance lead-in kept before the peak
     SC_POST_S          = 5.0    # …and tail kept after it (a shot / save often lands
@@ -190,9 +191,21 @@ class HighlightClassifier:
             (w for w in windows if w["label"] in peak_labels and w["confidence"] >= conf_gate),
             key=lambda w: w["window_start_s"],
         )
+        # A run of merely-adequate windows (generic zone possession that never
+        # becomes a real chance) can otherwise bridge gap after gap and pull an
+        # entire 30-60s scene into "one cluster" — confirmed on a real reel,
+        # where two whole scenes (58.3s of raw footage) became a single 57.4s
+        # clip with no real trim at all. Refuse to grow a cluster past
+        # PEAK_MAX_CLUSTER_S; a window that would push it over starts a new
+        # cluster instead; real scoring chances observed so far run 8-16s.
         clusters: list[dict] = []
         for w in peaks:
-            if clusters and w["window_start_s"] - clusters[-1]["end_s"] <= self.PEAK_CLUSTER_GAP_S:
+            if (
+                clusters
+                and w["window_start_s"] - clusters[-1]["end_s"] <= self.PEAK_CLUSTER_GAP_S
+                and max(clusters[-1]["end_s"], w["window_end_s"]) - clusters[-1]["start_s"]
+                    <= self.PEAK_MAX_CLUSTER_S
+            ):
                 clusters[-1]["end_s"]      = max(clusters[-1]["end_s"], w["window_end_s"])
                 clusters[-1]["confidence"] = max(clusters[-1]["confidence"], w["confidence"])
             else:
