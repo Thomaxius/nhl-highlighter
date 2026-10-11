@@ -92,8 +92,16 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
+    # Write to a temp file in the same directory and atomically rename it into
+    # place. A plain write_text() leaves a truncated, corrupt JSON file behind
+    # if the process is killed (Ctrl+C, OOM, systemd restart) mid-write — hit
+    # this for real once already. os.replace() is atomic on both POSIX and
+    # Windows: the old file is either fully there or fully replaced, never
+    # half-written.
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(tmp, STATE_FILE)
 
 
 # ── YouTube OAuth service ─────────────────────────────────────────────────────

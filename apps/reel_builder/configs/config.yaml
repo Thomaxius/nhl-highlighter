@@ -4,6 +4,8 @@ pipeline:
   min_confidence: 0.55
   sc_min_confidence: 0.45   # minimum confidence for scoring_chance clips to enter reel
   sc_rescue_confidence: 0.75  # demoted no-banner goals at/above this become scoring chances
+  sc_shot_floor: 0.20       # min existing scoring_chance confidence for a detected SOG shot to corroborate it (Step 4e)
+  sc_shot_boosted_confidence: 0.70  # confidence a shot-corroborated scoring_chance is boosted to (Step 4e)
   add_overlays: true
   music_path: null          # set to a .mp3 path to add background music
 

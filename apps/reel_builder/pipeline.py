@@ -36,6 +36,7 @@ from src.detection.banner_detector import BannerDetector
 from src.detection.game_clock_detector import GameClockDetector
 from src.detection.vs_screen_detector import VsScreenDetector
 from src.detection.pause_menu_detector import PauseMenuDetector
+from src.detection.score_detector import ScoreDetector
 from src.detection.stats_detector import detect_stats_screens, save_stats_csv, format_description
 from src.detection.star_detector import detect_star_screens, StarScreen as StarScreenResult
 from src.assembly.reel_builder import build_reel
@@ -585,6 +586,8 @@ def run_pipeline(
     min_confidence: float = _CFG["pipeline"]["min_confidence"],
     sc_min_confidence: float = _CFG["pipeline"]["sc_min_confidence"],
     sc_rescue_confidence: float = _CFG["pipeline"]["sc_rescue_confidence"],
+    sc_shot_floor: float = _CFG["pipeline"]["sc_shot_floor"],
+    sc_shot_boosted_confidence: float = _CFG["pipeline"]["sc_shot_boosted_confidence"],
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -1280,6 +1283,25 @@ def run_pipeline(
     else:
         logger.info("Skipping pause-menu detection (apps/reel_builder/configs/pause_menu_template.png not found)")
 
+    # ── Step 4e: Score/SOG detection (OCR scoreboard) ────────────────────────
+    # Reads the HUD's own score and shots-on-goal counters as a signal
+    # independent of the ML classifier and the GOAL banner. score_changed
+    # boosts a segment's existing "goal" confidence (banner stays the ground
+    # truth for the label itself — see Step 4b/4c above); sog_changed does the
+    # same for a segment the classifier already leaned toward "scoring_chance"
+    # (>= sc_shot_floor) — a real shot is strong enough physical evidence that
+    # it doesn't need the classifier to have already been confident, it jumps
+    # straight to sc_shot_boosted_confidence rather than just nudging past
+    # build_reel's sc_min_confidence gate. Neither path ever sets or changes
+    # the label on its own.
+    logger.info("━━━  Step 4e: Score/SOG detection  ━━━")
+    score_detector = ScoreDetector()
+    results = score_detector.score_segments(
+        results,
+        sc_shot_floor=sc_shot_floor,
+        sc_boosted_confidence=sc_shot_boosted_confidence,
+    )
+
     # ── Step 4f: Chain goal → celebration → replay ───────────────────────────
     logger.info("━━━  Step 4f: Chaining goal sequences  ━━━")
     results = _chain_goal_sequences(results)
@@ -1573,6 +1595,8 @@ def _build_one(file_path: Path, output_path: str, args) -> bool:
                 min_confidence=args.min_confidence,
                 sc_min_confidence=args.sc_min_confidence,
                 sc_rescue_confidence=args.sc_rescue_confidence,
+                sc_shot_floor=args.sc_shot_floor,
+                sc_shot_boosted_confidence=args.sc_shot_boosted_confidence,
             )
             return True
         except Exception:
@@ -1601,6 +1625,10 @@ def main():
                    help="Min confidence for scoring_chance clips")
     p.add_argument("--sc_rescue_confidence", type=float, default=_CFG["pipeline"]["sc_rescue_confidence"],
                    help="Demoted no-banner goals at/above this become scoring chances")
+    p.add_argument("--sc_shot_floor", type=float, default=_CFG["pipeline"]["sc_shot_floor"],
+                   help="Min existing scoring_chance confidence for a detected SOG shot to corroborate it (Step 4e)")
+    p.add_argument("--sc_shot_boosted_confidence", type=float, default=_CFG["pipeline"]["sc_shot_boosted_confidence"],
+                   help="Confidence a shot-corroborated scoring_chance is boosted to (Step 4e)")
     p.add_argument("--smoke-test", action="store_true",
                    help="Verify imports, external binaries and required assets, then exit")
     p.add_argument("--local", action="store_true",

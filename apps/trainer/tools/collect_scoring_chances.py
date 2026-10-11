@@ -16,6 +16,13 @@ Usage
         --segments_dir "data/processed/segments/NHL 25_20260225202819_norm" \
         --output_dir   data/labeled/scoring_chance
 
+    # Point it at a single raw/normalised match file instead of a pre-split
+    # segments folder, and it scans the file directly (sampling every ~1s)
+    # instead of requiring a PySceneDetect split first:
+    python scripts/collect_scoring_chances.py \
+        --segments_dir "data/processed/NHL 25_20260903201224_norm.mp4" \
+        --output_dir   data/labeled/scoring_chance
+
     # Dry run to see what would be collected without copying:
     python scripts/collect_scoring_chances.py --dry_run
 
@@ -23,7 +30,7 @@ Usage
     python scripts/collect_scoring_chances.py --include_goals
 
     # Adjust window size:
-    python scripts/collect_scoring_chances.py --pre_shot 6 --post_shot 1.5
+    python scripts/collect_scoring_chances.py --pre_shot 3 --post_shot 2
 
 Notes
 -----
@@ -40,7 +47,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# score_detector.py lives under apps/reel_builder, a sibling app — not under
+# apps/trainer (this script's own parent). parents[1] here is apps/trainer.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "reel_builder"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +76,7 @@ def extract_window(
     curr_seg: Path,
     output_path: Path,
     shot_time: float = 0.0,
-    pre_shot_s: float = 6.0,
+    pre_shot_s: float = 3.0,
     post_shot_s: float = 2.0,
 ) -> bool:
     """
@@ -127,7 +136,7 @@ def collect(
     segments_dir: Path,
     output_dir: Path,
     goals_dir: Path | None = None,
-    pre_shot_s: float = 6.0,
+    pre_shot_s: float = 3.0,
     post_shot_s: float = 2.0,
     dry_run: bool = False,
 ) -> None:
@@ -156,7 +165,15 @@ def collect(
         if goals_dir:
             goals_dir.mkdir(parents=True, exist_ok=True)
 
-    detector = ScoreDetector(sample_frames=6)
+    # 12 samples gives ~3s timestamp resolution on a typical ~30-40s segment —
+    # important now that the clip window (pre_shot/post_shot) is only a few
+    # seconds wide, so a coarse shot_time estimate can run the window off the
+    # end of the segment. (Pushing this higher, e.g. 24, surfaces single-frame
+    # OCR misreads more often — the score aggregator keeps the last successful
+    # read rather than a majority vote, so one bad frame can flip the detected
+    # score. 12 stayed clean in testing; revisit alongside a majority-vote
+    # aggregator if more resolution is needed later.)
+    detector = ScoreDetector(sample_frames=12)
     shots_found = 0
     goals_found = 0
     last_match = None
@@ -181,7 +198,11 @@ def collect(
             if not dry_run:
                 shutil.copy2(seg, dest)
 
-        elif result["sog_changed"]:
+        # Not elif: score_changed uses the noisier team-name+score OCR crop and
+        # can misfire on a single bad frame (last-successful-read aggregation,
+        # no majority vote). A false goal read should never suppress a real
+        # SOG-based scoring-chance detection.
+        if result["sog_changed"]:
             shot_timestamps = result.get("shot_timestamps") or [0.0]
             for shot_i, shot_time in enumerate(shot_timestamps):
                 shots_found += 1
@@ -213,18 +234,101 @@ def collect(
         logger.info("  Output: %s", output_dir)
 
 
+def extract_clip(src: Path, dest: Path, start_s: float, duration_s: float) -> bool:
+    """
+    Cut [start_s, start_s + duration_s] straight out of *src*. Unlike
+    extract_window(), there's no stitching here — collect_from_raw() scans
+    one continuous file, so a clip window never needs content from a
+    "previous segment"; it's all on the same timeline.
+    """
+    start_s = max(0.0, start_s)
+    r = subprocess.run([
+        "ffmpeg", "-y", "-ss", str(start_s), "-i", str(src),
+        "-t", str(duration_s), "-c", "copy", str(dest),
+    ], capture_output=True)
+    return r.returncode == 0
+
+
+def collect_from_raw(
+    video_path: Path,
+    output_dir: Path,
+    goals_dir: Path | None = None,
+    pre_shot_s: float = 3.0,
+    post_shot_s: float = 2.0,
+    sample_interval_s: float = 1.0,
+    dry_run: bool = False,
+) -> None:
+    """
+    Scan a single un-split raw/normalised match file directly for scoring
+    chances and goals — no PySceneDetect pass needed first. See
+    ScoreDetector.scan_video() for the detection side; this just turns its
+    events into clips cut straight out of the source file.
+    """
+    from src.detection.score_detector import ScoreDetector
+
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if goals_dir:
+            goals_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Scanning %s directly (sampling every %.1fs, no scene split needed)",
+        video_path.name, sample_interval_s,
+    )
+    detector = ScoreDetector(sample_frames=12)
+    events = detector.scan_video(video_path, sample_interval_s=sample_interval_s)
+
+    shots_found = 0
+    goals_found = 0
+    for ev in events:
+        is_goal = ev["type"] == "goal"
+        dest_dir = (goals_dir or output_dir) if is_goal else output_dir
+        label = "goal" if is_goal else "scoring_chance"
+        # Timestamp baked into the filename since there's no segment stem to
+        # key off — multiple events from the same source file need distinct
+        # unambiguous names.
+        dest = dest_dir / f"{video_path.stem}_t{ev['time']:07.1f}_{label}{video_path.suffix}"
+
+        if is_goal:
+            goals_found += 1
+            logger.info("  GOAL  → %s  @t=%.1fs  (score: %s-%s)", dest.name, ev["time"], ev["away"], ev["home"])
+        else:
+            shots_found += 1
+            logger.info("  SHOT  → %s  @t=%.1fs  (SOG: %s-%s)", dest.name, ev["time"], ev["sog_away"], ev["sog_home"])
+
+        if not dry_run:
+            ok = extract_clip(video_path, dest, ev["time"] - pre_shot_s, pre_shot_s + post_shot_s)
+            if not ok:
+                logger.warning("    ffmpeg failed for %s", dest.name)
+
+    logger.info("")
+    logger.info("Done%s:", " (dry run)" if dry_run else "")
+    logger.info("  Scoring chance clips: %d", shots_found)
+    logger.info("  Goal clips:           %d", goals_found)
+    if not dry_run:
+        logger.info("  Output: %s", output_dir)
+
+
 def main():
     p = argparse.ArgumentParser(description="Auto-collect scoring chance clips via SOG detection")
     p.add_argument("--segments_dir", default="data/processed/segments",
-                   help="Folder containing segment .mp4 files (or match subfolders)")
+                   help="Folder containing segment .mp4 files (or match subfolders), "
+                        "OR a single raw/normalised match .mp4 — if this points to a "
+                        "file rather than a folder, it's scanned directly with no "
+                        "scene-splitting pass required.")
     p.add_argument("--output_dir", default="data/labeled/scoring_chance",
                    help="Where to copy detected shot-on-goal clips")
     p.add_argument("--include_goals", action="store_true",
                    help="Also copy goal clips (score change) to data/labeled/goal/")
-    p.add_argument("--pre_shot", type=float, default=6.0,
-                   help="Seconds to include before the shot (from end of previous segment). Default 6.")
+    p.add_argument("--pre_shot", type=float, default=3.0,
+                   help="Seconds to include before the shot (from end of previous segment). Default 3.")
     p.add_argument("--post_shot", type=float, default=2.0,
                    help="Seconds to include after the shot (start of SOG-change segment). Default 2.")
+    p.add_argument("--sample_interval", type=float, default=1.0,
+                   help="Raw-file mode only: seconds between OCR samples while scanning "
+                        "the whole match. Default 1.0.")
     p.add_argument("--dry_run", action="store_true",
                    help="Print what would be collected without copying")
     p.add_argument("--debug_roi", metavar="VIDEO_PATH",
@@ -237,9 +341,22 @@ def main():
         return
 
     goals_dir = Path("data/labeled/goal") if args.include_goals else None
+    target = Path(args.segments_dir)
+
+    if target.is_file():
+        collect_from_raw(
+            video_path=target,
+            output_dir=Path(args.output_dir),
+            goals_dir=goals_dir,
+            pre_shot_s=args.pre_shot,
+            post_shot_s=args.post_shot,
+            sample_interval_s=args.sample_interval,
+            dry_run=args.dry_run,
+        )
+        return
 
     collect(
-        segments_dir=Path(args.segments_dir),
+        segments_dir=target,
         output_dir=Path(args.output_dir),
         goals_dir=goals_dir,
         pre_shot_s=args.pre_shot,
