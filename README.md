@@ -43,8 +43,8 @@ apps/
 └── uploader/        # Uploads a finished reel back to YouTube
 ```
 
-Recordings are added by hand: run **reel_builder** on a recording, then **uploader** to publish the reel.
-Each can be run independently.
+Recordings are added by hand. `apps/processor/process_local.py` takes each recording in `apps/shared/data/raw/`, runs **reel_builder**, publishes the reel with **uploader**, records the result in `apps/shared/data/processed_videos.json` and moves the source to `raw/processed_local/`.
+Each app can also be run independently.
 
 ---
 
@@ -213,6 +213,24 @@ python apps/reel_builder/pipeline.py \
 Output is saved to `data/exports/` automatically.
 
 ---
+
+### Processing recordings end to end (`apps/processor`)
+
+```bash
+python apps/processor/process_local.py                  # every pending file in apps/shared/data/raw/
+python apps/processor/process_local.py --file game.mp4  # one specific file
+python apps/processor/process_local.py --force          # reprocess files already marked done
+```
+
+For each file: pipeline → upload (privacy from `UPLOAD_PRIVACY`, default `unlisted`) → mark `done` in `processed_videos.json` → move the source to `raw/processed_local/` and delete the exported reel. If the upload fails the entry is marked `upload_failed` and the next run retries only the upload.
+
+To have reels uploaded automatically as soon as you drop a recording into `raw/`, run it from cron on the server. Overlapping runs are safe (a lock makes a second invocation exit at once while a long pipeline is still going), and a run interrupted by a crash or reboot is picked up again next time:
+
+```
+*/15 * * * * cd /opt/nhl-highlighter && .venv/bin/python apps/processor/process_local.py >> logs/process_local_cron.log 2>&1
+```
+
+The upload needs a valid uploader token — see *Keeping the OAuth token alive* above.
 
 ## App 2 — Uploader (`apps/uploader`)
 
