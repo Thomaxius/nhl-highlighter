@@ -29,7 +29,7 @@ from transformers import (
 from torch.utils.data import DataLoader
 import numpy as np
 
-from src.training.dataset import NHLSegmentDataset
+from .dataset import NHLSegmentDataset
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,15 @@ def train(
     output_dir = Path(output_dir)
 
     # ── Discover labels ──────────────────────────────────────────────────────
-    labels = sorted([d.name for d in data_dir.iterdir() if d.is_dir()])
+    # Only folders that actually hold videos become classes. An empty folder
+    # (or one with just a .gitkeep) would otherwise add a class the model can
+    # never learn, skew the class-weight maths, and leave a dead output that
+    # the classifier could still predict.
+    _video_exts = {".mp4", ".webm", ".mov", ".mkv"}
+    labels = sorted(
+        d.name for d in data_dir.iterdir()
+        if d.is_dir() and any(f.suffix.lower() in _video_exts for f in d.iterdir() if f.is_file())
+    )
     logger.info("Labels: %s", labels)
 
     # ── Datasets ─────────────────────────────────────────────────────────────

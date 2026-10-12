@@ -39,7 +39,7 @@ LABEL_MAP = {
     "scoring_chance":        "scoring_chance",
     "celebration":           "celebration",
     "replay":                "goal_replay",
-    "hit_replay":            "other_replay",
+    "hit_replay":            "hit_replay",
     "closecall_replay":      "other_replay",
     "faceoff":               "faceoff",
     "faceoff_cutscene":      "faceoff_cutscene",

@@ -139,7 +139,7 @@ def _chain_goal_sequences(
             # run — inferred goals / scoring chances frequently have no celebration
             # cutscene, so their replay begins straight away as `other_replay`.
             is_follow = label in FOLLOW_LABELS or (
-                label == "other_replay" and (replay_started or accumulated_gap_s == 0.0)
+                label in {"other_replay", "hit_replay"} and (replay_started or accumulated_gap_s == 0.0)
             )
             if is_follow:
                 seg["chain_order"] = order
@@ -150,7 +150,7 @@ def _chain_goal_sequences(
                     "  Chained %s (order %d, goal %d): %s",
                     label, order, goal_idx, Path(seg["path"]).name,
                 )
-                if label in {"celebration", "goal_replay", "other_replay"}:
+                if label in {"celebration", "goal_replay", "other_replay", "hit_replay"}:
                     replay_started = True
                 order += 1
                 accumulated_gap_s = 0.0  # reset gap counter once we find a highlight
@@ -251,6 +251,63 @@ def _prior_context(results: list[dict], i: int) -> str:
         if prev.get("banner_detected") or prev.get("inferred_goal"):
             return "replay_tail"
     return "normal"
+
+
+def _gate_hit_replays(results: list[dict], min_confidence: float) -> list[dict]:
+    """
+    Only accept a `hit_replay` prediction at or above *min_confidence*.
+
+    `hit_replay` is a narrow class split out of `other_replay`, with far fewer
+    training clips than the classes around it, so a weak guess is more likely
+    noise than a real hit replay. Below the bar the segment falls back to
+    `other_replay` — exactly how it was labelled before the split — so a
+    low-confidence guess behaves as it always did and can't trigger anything
+    the old label wouldn't have.
+    """
+    demoted = kept = 0
+    for seg in results:
+        if seg.get("label") != "hit_replay":
+            continue
+        if seg.get("confidence", 0.0) >= min_confidence:
+            kept += 1
+            continue
+        seg["label"] = "other_replay"
+        seg["hit_replay_demoted"] = True
+        demoted += 1
+    if kept or demoted:
+        logger.info(
+            "  hit_replay gate (>= %.0f%%): kept %d, fell back to other_replay %d",
+            min_confidence * 100, kept, demoted,
+        )
+    return results
+
+
+def _trim_hit_replays(results: list[dict], max_s: float) -> list[dict]:
+    """Cut standalone hit replays down to their first *max_s* seconds.
+
+    A scene can run up to 45s, far too long for a replay of one hit. The
+    scene-splitter cuts at the replay's own transitions, so the start of the
+    clip is the start of the replay. Clips that are chained into a goal or
+    scoring chance, or already carry a trim window, are left alone.
+    """
+    trimmed = 0
+    for seg in results:
+        if seg.get("label") != "hit_replay":
+            continue
+        if "trim_start_s" in seg and "trim_end_s" in seg:
+            continue
+        if seg.get("chain_goal_idx") is not None or seg.get("chain_sc_idx") is not None:
+            continue
+        dur = _get_clip_duration(seg["path"])
+        if dur <= max_s:
+            continue
+        seg["trim_start_s"] = 0.0
+        seg["trim_end_s"] = max_s
+        trimmed += 1
+        logger.info("  Trimmed hit_replay to first %.0fs (was %.0fs): %s", max_s, dur, Path(seg["path"]).name)
+    if trimmed:
+        logger.info("  Trimmed %d hit replay(s).", trimmed)
+    return results
 
 
 def _rescue_demoted_goals(results: list[dict]) -> list[dict]:
@@ -541,7 +598,7 @@ def _infer_goals_from_faceoff_pattern(
             nxt = results[actual_idx]
             actual_idx += 1
 
-            is_replay = nxt.get("label") in {"goal_replay", "other_replay"}
+            is_replay = nxt.get("label") in {"goal_replay", "other_replay", "hit_replay"}
             if is_replay:
                 if not in_replay_run:
                     # First segment of a new replay run — costs one virtual step
@@ -588,6 +645,7 @@ def run_pipeline(
     sc_rescue_confidence: float = _CFG["pipeline"]["sc_rescue_confidence"],
     sc_shot_floor: float = _CFG["pipeline"]["sc_shot_floor"],
     sc_shot_boosted_confidence: float = _CFG["pipeline"]["sc_shot_boosted_confidence"],
+    hit_replay_min_confidence: float = _CFG["pipeline"]["hit_replay_min_confidence"],
 ) -> None:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
@@ -648,6 +706,7 @@ def run_pipeline(
     logger.info("━━━  Step 4: Classifying segments  ━━━")
     classifier = HighlightClassifier(checkpoint_path=checkpoint)
     results = classifier.classify_segments(all_segments)
+    results = _gate_hit_replays(results, hit_replay_min_confidence)
 
     # ── Steps 4b + 4d + 4d.5: Raw-video scans (parallel) ─────────────────────
     # All three steps scan the same normalised video for independent signals.
@@ -1317,6 +1376,7 @@ def run_pipeline(
     # ── Step 4f.6: Trim scoring chances + inferred goals to the action ───────
     logger.info("━━━  Step 4f.6: Trimming chance/inferred clips to audio peak  ━━━")
     results = _trim_chance_clips(results)
+    results = _trim_hit_replays(results, _CFG["pipeline"]["hit_replay_max_s"])
 
     # ── Step 4f.7: Chain scoring chances PySceneDetect split mid-action ──────
     logger.info("━━━  Step 4f.7: Chaining adjacent scoring chances  ━━━")
@@ -1413,6 +1473,7 @@ def run_pipeline(
         max_clips=max_clips,
         min_confidence=min_confidence,
         sc_min_confidence=sc_min_confidence,
+        max_hit_replays=_CFG["pipeline"]["max_hit_replays"],
         period_transitions_dir=_pt_dir if _pt_dir.exists() else None,
         confirmed_period_boundaries=confirmed_period_boundaries,
     )
@@ -1597,6 +1658,7 @@ def _build_one(file_path: Path, output_path: str, args) -> bool:
                 sc_rescue_confidence=args.sc_rescue_confidence,
                 sc_shot_floor=args.sc_shot_floor,
                 sc_shot_boosted_confidence=args.sc_shot_boosted_confidence,
+                hit_replay_min_confidence=args.hit_replay_min_confidence,
             )
             return True
         except Exception:
@@ -1629,6 +1691,8 @@ def main():
                    help="Min existing scoring_chance confidence for a detected SOG shot to corroborate it (Step 4e)")
     p.add_argument("--sc_shot_boosted_confidence", type=float, default=_CFG["pipeline"]["sc_shot_boosted_confidence"],
                    help="Confidence a shot-corroborated scoring_chance is boosted to (Step 4e)")
+    p.add_argument("--hit_replay_min_confidence", type=float, default=_CFG["pipeline"]["hit_replay_min_confidence"],
+                   help="A hit_replay prediction below this falls back to other_replay")
     p.add_argument("--smoke-test", action="store_true",
                    help="Verify imports, external binaries and required assets, then exit")
     p.add_argument("--local", action="store_true",

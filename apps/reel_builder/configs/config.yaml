@@ -6,6 +6,9 @@ pipeline:
   sc_rescue_confidence: 0.75  # demoted no-banner goals at/above this become scoring chances
   sc_shot_floor: 0.20       # min existing scoring_chance confidence for a detected SOG shot to corroborate it (Step 4e)
   sc_shot_boosted_confidence: 0.70  # confidence a shot-corroborated scoring_chance is boosted to (Step 4e)
+  hit_replay_min_confidence: 0.80   # a hit_replay prediction below this falls back to other_replay
+  max_hit_replays: 4        # max standalone hit_replay clips in the reel (lowest priority, fills spare room only)
+  hit_replay_max_s: 10.0    # standalone hit replays longer than this are cut to their first N seconds
   add_overlays: true
   music_path: null          # set to a .mp3 path to add background music
 

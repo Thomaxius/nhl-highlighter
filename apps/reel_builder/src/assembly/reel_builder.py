@@ -35,6 +35,7 @@ def build_reel(
     max_clips: int = 20,
     min_confidence: float = 0.55,
     sc_min_confidence: float = 0.45,
+    max_hit_replays: int = 4,
     add_overlays: bool = True,
     period_transitions_dir: Optional[str | Path] = None,
     confirmed_period_boundaries: Optional[set] = None,
@@ -51,6 +52,9 @@ def build_reel(
         min_confidence:     Minimum confidence to include a clip.
         sc_min_confidence:  Minimum confidence specifically for scoring_chance clips
                             (lower than min_confidence to catch weaker predictions).
+        max_hit_replays:    Max standalone hit_replay clips. They are lowest priority:
+                            they only fill room left under max_clips after goals and
+                            other highlights, highest confidence first.
         add_overlays:       Whether to burn label text onto each clip.
 
     Returns:
@@ -60,7 +64,7 @@ def build_reel(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Filter & rank
-    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay", "scoring_chance"}
+    highlight_labels = {"goal", "save", "hit", "fight", "celebration", "goal_replay", "other_replay", "hit_replay", "scoring_chance"}
     filtered = [
         s for s in segments
         if s.get("label") in highlight_labels and s.get("confidence", 0) >= (
@@ -149,6 +153,13 @@ def build_reel(
             for k, lead in enumerate(leads):
                 is_last = (k == len(leads) - 1)
                 groups.append([lead] + (chained if is_last else []))
+        elif seg.get("label") == "hit_replay":
+            # A hit replay that wasn't absorbed into a goal / scoring-chance
+            # chain above (those claim their followers first, via used_ids)
+            # is a highlight in its own right. It only reaches here already
+            # past the pipeline's hit_replay confidence gate.
+            groups.append([seg])
+            used_ids.add(id(seg))
         elif seg.get("label") in {"celebration", "goal_replay", "other_replay"}:
             # Never include celebration/replay unless chained to a goal or scoring chance — skip
             used_ids.add(id(seg))
@@ -200,8 +211,19 @@ def build_reel(
                         if g[0].get("banner_detected") or g[0].get("inferred_goal")]
     other_highlights = [g for g in highlight_middle
                         if not (g[0].get("banner_detected") or g[0].get("inferred_goal"))]
+    # Standalone hit replays are the lowest-priority highlight: they only get
+    # whatever room goals and the other highlights leave under max_clips, and
+    # never more than max_hit_replays — a game can have dozens of hits, and
+    # they must not crowd out scoring chances. Best-confidence ones win.
+    hit_highlights   = [g for g in other_highlights if g[0].get("label") == "hit_replay"]
+    other_highlights = [g for g in other_highlights if g[0].get("label") != "hit_replay"]
     remaining_cap    = max(0, max_clips - len(goal_highlights))
-    selected_highlights = set(id(g) for g in goal_highlights + other_highlights[:remaining_cap])
+    primary_selected = other_highlights[:remaining_cap]
+    hit_room         = min(max_hit_replays, max(0, remaining_cap - len(primary_selected)))
+    hit_selected     = sorted(
+        hit_highlights, key=lambda g: g[0].get("confidence", 0.0), reverse=True,
+    )[:hit_room]
+    selected_highlights = set(id(g) for g in goal_highlights + primary_selected + hit_selected)
     # Re-merge maintaining original chronological order.
     selected_middle = [g for g in middle_groups
                        if id(g) in selected_highlights or g in structural_middle]
@@ -255,8 +277,13 @@ def build_reel(
     logger.info(
         "Building reel from %d groups (%d intro + %d structural + %d goals + %d other highlights + %d game_end) …",
         len(selected_groups), len(head_groups), len(structural_middle),
-        len(goal_highlights), len(other_highlights[:remaining_cap]), int(bool(game_end_segs)),
+        len(goal_highlights), len(primary_selected) + len(hit_selected), int(bool(game_end_segs)),
     )
+    if hit_highlights:
+        logger.info(
+            "  Hit replays: %d candidate(s), %d included (cap %d, room %d)",
+            len(hit_highlights), len(hit_selected), max_hit_replays, hit_room,
+        )
 
     timeline_snapshot: list[tuple[list[dict], float]] = []
 
