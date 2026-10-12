@@ -1,7 +1,7 @@
 # ─── Video Processing ────────────────────────────────────────────────────────
 opencv-python>=4.9.0
 moviepy>=1.0.3
-scenedetect[opencv]>=0.6.3
+scenedetect[opencv]==0.7
 
 # ─── Audio Analysis ──────────────────────────────────────────────────────────
 librosa>=0.10.2
@@ -11,18 +11,27 @@ pydub>=0.25.1
 pytesseract>=0.3.10           # requires: brew install tesseract
 
 # ─── Deep Learning ───────────────────────────────────────────────────────────
-torch>=2.2.0
-torchvision>=0.17.0
-torchaudio>=2.2.0
+# Pinned EXACTLY, and identical on the trainer machine and the server. A checkpoint is
+# only safe to load with the transformers version that saved it: 5.3.0 stores VideoMAE
+# attention biases as q_bias/v_bias, 5.10.2 expects query/key/value.bias, so a model
+# trained on one and run on the other silently drops its trained attention biases
+# ("UNEXPECTED / MISSING" load report). Bump these together, retrain, then redeploy.
+# Windows note: PyPI's torch is CPU-only there; for the GPU install it from the CUDA
+# index instead:  pip install torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \n#                     --index-url https://download.pytorch.org/whl/cu130
+torch==2.12.0
+torchvision==0.27.0
+torchaudio==2.11.0
 pytorchvideo>=0.1.5
-transformers>=4.40.0          # VideoMAE, TimeSformer via HuggingFace
-accelerate>=0.29.0
+transformers==5.10.2          # VideoMAE, TimeSformer via HuggingFace
+huggingface_hub==1.18.0
+safetensors==0.8.0
+accelerate==1.13.0
 
 # ─── Data / Annotation ───────────────────────────────────────────────────────
-numpy>=1.26.0
+numpy==2.4.6
 pandas>=2.2.0
 Pillow>=10.3.0
-scikit-learn>=1.4.0
+scikit-learn==1.9.0
 
 # ─── Experiment Tracking ─────────────────────────────────────────────────────
 wandb>=0.16.0
