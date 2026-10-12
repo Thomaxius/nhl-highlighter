@@ -33,6 +33,7 @@ from typing import Optional
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 # Disable FFmpeg hardware-accelerated video decoding (VideoToolbox on macOS).
@@ -52,6 +53,18 @@ ROI_X = 0.02
 ROI_Y = 0.035
 ROI_W = 0.2176  # ~21.76% of width → 418px
 ROI_H = 0.077   # ~7.7% of height → 83px
+
+
+# The five tesseract calls per frame are independent subprocesses, so they run
+# concurrently (they release the GIL). Shared pool, created lazily.
+_OCR_POOL: Optional[ThreadPoolExecutor] = None
+
+
+def _ocr_pool() -> ThreadPoolExecutor:
+    global _OCR_POOL
+    if _OCR_POOL is None:
+        _OCR_POOL = ThreadPoolExecutor(max_workers=5, thread_name_prefix="score-ocr")
+    return _OCR_POOL
 
 
 class ScoreDetector:
@@ -757,8 +770,9 @@ class ScoreDetector:
         score_top = binary[:mid,  sx1:sx2]
         score_bot = binary[mid:,  sx1:sx2]
         cfg_line  = "--psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ "
-        away_score_text = _ocr(score_top, cfg_line)
-        home_score_text = _ocr(score_bot, cfg_line)
+        pool = _ocr_pool()
+        away_score_f = pool.submit(_ocr, score_top, cfg_line)
+        home_score_f = pool.submit(_ocr, score_bot, cfg_line)
 
         # ── SOG sub-crop (x: 65-78%) — digit rows only, skip middle label ──
         gx1, gx2 = int(0.65 * w), int(0.78 * w)
@@ -769,14 +783,20 @@ class ScoreDetector:
         sog_away_crop = binary[int(0.08 * h):int(0.35 * h), gx1:gx2]
         sog_home_crop = binary[int(0.58 * h):int(0.90 * h), gx1:gx2]
         cfg_char = "--psm 10 -c tessedit_char_whitelist=0123456789"
-        away_sog_text = _ocr(sog_away_crop, cfg_char)
-        home_sog_text = _ocr(sog_home_crop, cfg_char)
+        away_sog_f = pool.submit(_ocr, sog_away_crop, cfg_char)
+        home_sog_f = pool.submit(_ocr, sog_home_crop, cfg_char)
 
         # ── Clock sub-crop (x: 80-100%, top half) ──────────────────────────
         cx1 = int(0.80 * w)
         clock_crop = binary[:mid, cx1:]
         cfg_clock = "--psm 7 -c tessedit_char_whitelist=0123456789:"
-        clock_text = _ocr(clock_crop, cfg_clock)
+        clock_f = pool.submit(_ocr, clock_crop, cfg_clock)
+
+        away_score_text = away_score_f.result()
+        home_score_text = home_score_f.result()
+        away_sog_text = away_sog_f.result()
+        home_sog_text = home_sog_f.result()
+        clock_text = clock_f.result()
 
         # Pack into two lines that _parse_scores can split on
         # Format: "SCORE_TEXT|SOG_TEXT\nSCORE_TEXT|SOG_TEXT"
