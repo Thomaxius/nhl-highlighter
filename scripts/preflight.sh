@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Shared preflight checks for the poller and reel builder.
+# Shared preflight checks for the reel builder.
 #
 # Validates two prerequisites before kicking off a long-running job:
 #   1. Free disk space on the data filesystem (clips/segments/exports land here).
 #   2. OAuth tokens still refresh (no point running for an hour on a dead token).
 #
-# Sourced by run_poller.sh and run_reel_builder.sh, which call `preflight`
+# Sourced by run_reel_builder.sh, which calls `preflight`
 # after setting ROOT and PYTHON. Because the callers run with `set -e`, a
 # non-zero return aborts the run.
 #

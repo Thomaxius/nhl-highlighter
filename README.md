@@ -2,7 +2,7 @@
 
 Automatically generate broadcast-style highlight reels from your NHL 25 PS5 clips using a fine-tuned VideoMAE model, template-based detectors, audio analysis, and FFmpeg assembly.
 
-The end goal is to have a pipeline that automatically detects uploaded YouTube clips from PS5, converts them to a highlight reel, and uploads the result back to YouTube.
+The end goal is to have a pipeline that turns PS5 recordings into a highlight reel and uploads the result to YouTube.
 
 ## Notes
 This project is a quick 100% vibe coded slop for personal use. I didn't even write this disclaimer myself. Please don't let it be a reason for not headhunting, or let it be, but don't let the quality of programming or lack of it be it.
@@ -14,10 +14,9 @@ This project is a quick 100% vibe coded slop for personal use. I didn't even wri
     - [What each detection step does](#what-each-detection-step-does)
   - [Project Structure](#project-structure)
   - [Setup](#setup)
-    - [OAuth Setup (required for poller + uploader)](#oauth-setup-required-for-poller--uploader)
-  - [App 1 — Poller (`apps/poller`)](#app-1--poller-appspoller)
-  - [App 2 — Reel Builder (`apps/reel_builder`)](#app-2--reel-builder-appsreel_builder)
-  - [App 3 — Uploader (`apps/uploader`)](#app-3--uploader-appsuploader)
+    - [OAuth Setup (required for the uploader)](#oauth-setup-required-for-the-uploader)
+  - [App 1 — Reel Builder (`apps/reel_builder`)](#app-1--reel-builder-appsreel_builder)
+  - [App 2 — Uploader (`apps/uploader`)](#app-2--uploader-appsuploader)
   - [Labelling Training Data](#labelling-training-data)
   - [Training](#training)
   - [Template Images](#template-images)
@@ -35,17 +34,16 @@ This project is a quick 100% vibe coded slop for personal use. I didn't even wri
 
 ## Architecture
 
-The project is split into three independent apps:
+The project is split into two independent apps:
 
 ```
 apps/
-├── poller/          # Watches your YouTube channel for new uploads
 ├── reel_builder/    # Processes a video and produces a highlight reel
 └── uploader/        # Uploads a finished reel back to YouTube
 ```
 
-The full automated flow is: **poller** detects a new upload → invokes **reel_builder** → invokes **uploader**.
-All three can also be run independently.
+Recordings are added by hand: run **reel_builder** on a recording, then **uploader** to publish the reel.
+Each can be run independently.
 
 ---
 
@@ -92,8 +90,6 @@ PS5 clips (.mp4)
 ```
 nhl-highlighter/
 ├── apps/
-│   ├── poller/
-│   │   └── youtube_watcher.py       # YouTube polling daemon
 │   ├── reel_builder/
 │   │   ├── pipeline.py              # End-to-end CLI entry point
 │   │   ├── configs/                 # Template images and config.yaml
@@ -131,7 +127,6 @@ nhl-highlighter/
 │       └── training-data/           # Raw source clips by category
 ├── config/
 │   ├── client_secrets.json          # OAuth 2.0 credentials (not in git)
-│   ├── token.json                   # Cached poller OAuth token (not in git)
 │   └── youtube_token.json           # Cached uploader OAuth token (not in git)
 ├── infra/
 │   └── ansible/                     # Server provisioning playbooks
@@ -152,7 +147,7 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Linux/macOS
 pip install -r requirements.txt
-pip install -r requirements-server.txt   # needed for poller + uploader
+pip install -r requirements-server.txt   # needed for the uploader
 ```
 
 Verify FFmpeg and Tesseract are installed:
@@ -161,52 +156,20 @@ ffmpeg -version
 tesseract --version
 ```
 
-### OAuth Setup (required for poller + uploader)
+### OAuth Setup (required for the uploader)
 
-Both the poller and uploader authenticate with YouTube via OAuth 2.0:
+The uploader authenticates with YouTube via OAuth 2.0:
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com) → create a project
 2. Enable **YouTube Data API v3**
 3. Create credentials: **OAuth client ID** → Application type: **Desktop app**
 4. Download `client_secrets.json` → place at `config/client_secrets.json`
 5. Add your Google account as a **Test user** on the OAuth consent screen
-6. Run either app once interactively — a browser URL will be printed, paste it into the browser with the right Google account signed in, complete consent, and `token.json` is saved automatically
+6. Run the uploader once interactively — a browser URL will be printed, paste it into the browser with the right Google account signed in, complete consent, and `youtube_token.json` is saved automatically
 
 ---
 
-## App 1 — Poller (`apps/poller`)
-
-Polls your YouTube channel for new uploads, downloads them with yt-dlp, runs the reel builder, and triggers the uploader.
-
-**Required environment variables:**
-
-| Variable | Description |
-|---|---|
-| `YOUTUBE_CHANNEL_ID` | Your channel ID (from youtube.com/account_advanced) |
-| `OAUTH_CLIENT_SECRETS` | Path to `client_secrets.json` (default: `config/client_secrets.json`) |
-| `OAUTH_TOKEN_FILE` | Path to cached token (default: `config/token.json`) |
-| `APP_DIR` | Root of the project (default: `/opt/nhl-highlighter`) |
-
-**Optional:**
-
-| Variable | Default | Description |
-|---|---|---|
-| `POLL_INTERVAL_SECS` | `900` | Seconds between polls |
-| `MIN_VIDEO_DURATION_SECS` | `1800` | Skip videos shorter than this |
-| `UPLOAD_PRIVACY` | `unlisted` | Privacy of uploaded reels |
-
-**Run:**
-```powershell
-$env:YOUTUBE_CHANNEL_ID = "UCxxxxxxxxxxxxxxxxxxxx"
-$env:OAUTH_CLIENT_SECRETS = "k:\nhl-highlighter\config\client_secrets.json"
-$env:OAUTH_TOKEN_FILE = "k:\nhl-highlighter\config\token.json"
-$env:APP_DIR = "k:\nhl-highlighter"
-python apps/poller/youtube_watcher.py
-```
-
----
-
-## App 2 — Reel Builder (`apps/reel_builder`)
+## App 1 — Reel Builder (`apps/reel_builder`)
 
 Processes a raw game recording and produces a highlight reel.
 
@@ -228,7 +191,7 @@ Output is saved to `data/exports/` automatically.
 
 ---
 
-## App 3 — Uploader (`apps/uploader`)
+## App 2 — Uploader (`apps/uploader`)
 
 Uploads a finished reel to YouTube.
 
@@ -240,7 +203,7 @@ python apps/uploader/upload_youtube.py \
     --privacy unlisted
 ```
 
-Uses the same `client_secrets.json` as the poller but caches its token separately in `config/youtube_token.json` (needs the `youtube.upload` scope). The first run will print a URL — open it in your browser, complete consent, and the token is saved automatically. SCP it to the server for headless use:
+Uses `config/client_secrets.json` and caches its token in `config/youtube_token.json` (needs the `youtube.upload` scope). The first run will print a URL — open it in your browser, complete consent, and the token is saved automatically. SCP it to the server for headless use:
 ```bash
 scp config/youtube_token.json root@SERVER:/opt/nhl-highlighter/config/youtube_token.json
 ```

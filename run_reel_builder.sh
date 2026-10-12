@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="$([ -d "$ROOT/.venv" ] && echo "$ROOT/.venv/bin/python" || echo "$ROOT/venv/bin/python")"
 
-# Load watcher.env if present (gives token-check paths the same env as the poller).
+# Load config/watcher.env if present (optional legacy env file for the token-check paths).
 ENV_FILE="${ROOT}/config/watcher.env"
 if [ -f "$ENV_FILE" ]; then
     set -a

@@ -50,7 +50,6 @@
     - "{{ app_dir }}/logs"
     - "{{ app_dir }}/apps/shared/models/checkpoints"
     - "{{ app_dir }}/config"
-    - "{{ app_dir }}/apps/poller"
     - "{{ app_dir }}/apps/reel_builder"
     - "{{ app_dir }}/apps/uploader"
     - "{{ app_dir }}/apps/trainer"
