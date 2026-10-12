@@ -8,9 +8,8 @@ fresh token file. On a headless server it prints a URL: open it on any
 machine, approve, and the consent redirects back to this process.
 
 Usage (from the repo root):
-    python apps/auth/reauth.py poller     # re-consent the read-only poller token
-    python apps/auth/reauth.py uploader   # re-consent the upload token
-    python apps/auth/reauth.py both       # re-consent both (default)
+    python apps/auth/reauth.py            # re-consent the upload token
+    python apps/auth/reauth.py uploader   # same, explicit ('both' is accepted as an alias)
 
 Run as the same user that owns config/ (so file permissions match).
 """
@@ -41,12 +40,6 @@ class TokenSpec:
 
 
 SPECS: dict[str, TokenSpec] = {
-    "poller": TokenSpec(
-        "poller",
-        Path(os.environ.get("OAUTH_TOKEN_FILE", str(CONFIG_DIR / "token.json"))),
-        ("https://www.googleapis.com/auth/youtube.readonly",),
-        8080,
-    ),
     "uploader": TokenSpec(
         "uploader",
         CONFIG_DIR / "youtube_token.json",
@@ -80,7 +73,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Interactive OAuth re-consent.")
     parser.add_argument(
         "targets", nargs="*", default=["both"],
-        help="Which token(s) to re-auth: poller, uploader, or both (default).",
+        help="Which token to re-auth: uploader (default; 'both' is an alias for it).",
     )
     args = parser.parse_args()
 
@@ -91,7 +84,7 @@ def main() -> int:
         unknown = [t for t in targets if t not in SPECS]
         if unknown:
             print(f"ERROR: unknown target(s): {', '.join(unknown)}. "
-                  f"Choose from: poller, uploader, both.", file=sys.stderr)
+                  f"Choose from: uploader.", file=sys.stderr)
             return 2
         chosen = [SPECS[t] for t in targets]
 

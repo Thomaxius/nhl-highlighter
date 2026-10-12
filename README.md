@@ -15,6 +15,7 @@ This project is a quick 100% vibe coded slop for personal use. I didn't even wri
   - [Project Structure](#project-structure)
   - [Setup](#setup)
     - [OAuth Setup (required for the uploader)](#oauth-setup-required-for-the-uploader)
+    - [Keeping the OAuth token alive](#keeping-the-oauth-token-alive)
   - [App 1 — Reel Builder (`apps/reel_builder`)](#app-1--reel-builder-appsreel_builder)
   - [App 2 — Uploader (`apps/uploader`)](#app-2--uploader-appsuploader)
   - [Labelling Training Data](#labelling-training-data)
@@ -166,6 +167,28 @@ The uploader authenticates with YouTube via OAuth 2.0:
 4. Download `client_secrets.json` → place at `config/client_secrets.json`
 5. Add your Google account as a **Test user** on the OAuth consent screen
 6. Run the uploader once interactively — a browser URL will be printed, paste it into the browser with the right Google account signed in, complete consent, and `youtube_token.json` is saved automatically
+
+### Keeping the OAuth token alive
+
+The uploader refreshes its short-lived access token by itself every time it runs. What it cannot do is recover a *dead refresh token* — that needs a new consent. Two things keep that from biting you:
+
+1. **Publish the OAuth app.** While the consent screen is in **Testing** mode, Google expires refresh tokens after 7 days no matter what. In the Google Cloud Console go to APIs & Services → OAuth consent screen → **Publish app** (status "In production"). For a personal app no verification is needed; expect an "unverified app" warning once during consent.
+2. **Schedule the refresher** so the token stays in use and a dead one is noticed early. On the server, `crontab -e` and add (every 6 hours):
+
+```
+0 */6 * * * /opt/nhl-highlighter/scripts/run_token_refresher.sh >> /opt/nhl-highlighter/logs/token_refresher.log 2>&1
+```
+
+If the token needs a new consent the refresher writes `config/reauth_required.flag`, and `scripts/preflight.sh` stops the reel builder with a clear message instead of failing an hour into a run.
+
+**Re-consent** (the server has no browser, so tunnel the redirect port to your PC):
+
+```
+ssh -L 8081:localhost:8081 nhl@SERVER
+cd /opt/nhl-highlighter && source .venv/bin/activate && python apps/auth/reauth.py
+```
+
+Open the URL it prints in your local browser and approve.
 
 ---
 

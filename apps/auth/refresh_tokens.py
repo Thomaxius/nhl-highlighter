@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Background OAuth token refresher for NHL Highlighter.
 
-Keeps both YouTube tokens warm and persisted:
+Keeps the YouTube uploader token warm and persisted:
 
-  * poller   — config/token.json          (scope: youtube.readonly)
   * uploader — config/youtube_token.json   (scope: youtube.upload)
 
 For each token file it loads the stored credentials, refreshes the access
 token using the long-lived refresh token, and writes the refreshed
 credentials back to disk (mode 0600). This runs as a *separate process* from
-the poller/uploader so the tokens are always fresh on disk — a freshly
-restarted poller or a per-upload uploader never has to do a cold refresh, and
-a dead refresh token is detected here (early) instead of mid-upload.
+the uploader so the token is always fresh on disk — a per-upload uploader
+never has to do a cold refresh, and a dead refresh token is detected here
+(early) instead of mid-upload.
 
 IMPORTANT: a background process can only refresh a *living* refresh token. If
 the refresh token has been revoked/expired (``invalid_grant``), only an
@@ -60,11 +59,6 @@ class TokenSpec:
 
 
 TOKENS: list[TokenSpec] = [
-    TokenSpec(
-        name="poller",
-        token_file=Path(os.environ.get("OAUTH_TOKEN_FILE", str(CONFIG_DIR / "token.json"))),
-        scopes=("https://www.googleapis.com/auth/youtube.readonly",),
-    ),
     TokenSpec(
         name="uploader",
         token_file=CONFIG_DIR / "youtube_token.json",

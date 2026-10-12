@@ -47,11 +47,10 @@ preflight() {
         return 0
     fi
 
-    # refresh_tokens.py reads APP_DIR / OAUTH_TOKEN_FILE; default them to this
+    # refresh_tokens.py reads APP_DIR; default it to this
     # checkout so the check works whether or not the caller already exported them.
     export APP_DIR="${APP_DIR:-$root}"
     export OAUTH_CLIENT_SECRETS="${OAUTH_CLIENT_SECRETS:-$root/config/client_secrets.json}"
-    export OAUTH_TOKEN_FILE="${OAUTH_TOKEN_FILE:-$root/config/token.json}"
 
     echo "Preflight: validating OAuth tokens …"
     # --check refreshes in-memory only (never writes); exit 0 = all healthy.

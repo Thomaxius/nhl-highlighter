@@ -17,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -44,7 +45,14 @@ def get_authenticated_service():
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as exc:
+                # A dead refresh token can't be fixed headlessly, and falling through
+                # to the browser flow would hang a non-interactive run — fail clearly.
+                print(f"ERROR: YouTube refresh token is revoked or expired ({exc}).")
+                print("Re-consent with:  python apps/auth/reauth.py")
+                sys.exit(1)
         else:
             if not CREDENTIALS_FILE.exists():
                 print(f"ERROR: OAuth credentials file not found: {CREDENTIALS_FILE}")
@@ -58,7 +66,7 @@ def get_authenticated_service():
                 sys.exit(1)
 
             # run_local_server with open_browser=False prints a URL to visit,
-            # then waits for the redirect on port 8081 (separate from the poller's 8080).
+            # then waits for the redirect on port 8081.
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
             creds = flow.run_local_server(port=8081, open_browser=False)
 
