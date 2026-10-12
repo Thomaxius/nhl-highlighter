@@ -40,6 +40,7 @@ from src.detection.score_detector import ScoreDetector
 from src.detection.stats_detector import detect_stats_screens, save_stats_csv, format_description
 from src.detection.star_detector import detect_star_screens, StarScreen as StarScreenResult
 from src.assembly.reel_builder import build_reel
+from src.assembly.clip_windows import cap_window, shot_windows
 from src.progress import ETAReporter, format_duration
 
 logging.basicConfig(
@@ -282,6 +283,55 @@ def _gate_hit_replays(results: list[dict], min_confidence: float) -> list[dict]:
     return results
 
 
+def _anchor_chances_on_shots(
+    results: list[dict],
+    pre_s: float,
+    post_s: float,
+    max_len_s: float,
+    ignore_before_s: float,
+) -> list[dict]:
+    """Cut scoring chances around the shot the scoreboard actually counted.
+
+    The classifier only says "this scene looks chance-like" — across a diffuse scene
+    that blurs into a ~25s clip with the real shot somewhere inside it (a reel kept
+    25s of a scene for one weak shot). The HUD's shots-on-goal counter says exactly
+    when a shot happened, so when Step 4e found shots in a scoring_chance scene the
+    clip is built from [shot - pre_s, shot + post_s] windows instead, replacing the
+    classifier's trim. Scenes with no detected shot (a miss, a blocked shot, a HUD
+    that wasn't readable) keep the classifier's windows untouched.
+    """
+    anchored = 0
+    for seg in results:
+        if seg.get("label") != "scoring_chance":
+            continue
+        shots = seg.get("shot_times_s") or []
+        if not shots:
+            continue
+        dur = _get_clip_duration(seg["path"])
+        wins = shot_windows(shots, dur, pre_s, post_s, max_len_s, ignore_before_s)
+        if not wins:
+            continue
+        seg["trim_start_s"], seg["trim_end_s"] = wins[0]
+        extras = [
+            {"trim_start_s": s0, "trim_end_s": e0, "confidence": seg.get("confidence", 0.0)}
+            for s0, e0 in wins[1: HighlightClassifier.PEAK_MAX_EXTRA + 1]
+        ]
+        if extras:
+            seg["sc_extra_windows"] = extras
+        else:
+            seg.pop("sc_extra_windows", None)
+        seg["trim_anchor"] = "shot"
+        anchored += 1
+        logger.info(
+            "  Anchored on %d detected shot(s) %s -> clip [%.1f-%.1fs]%s: %s",
+            len(shots), [round(t, 1) for t in shots], wins[0][0], wins[0][1],
+            f" +{len(extras)} more" if extras else "", Path(seg["path"]).name,
+        )
+    if anchored:
+        logger.info("  Anchored %d scoring chance(s) on their detected shots.", anchored)
+    return results
+
+
 def _trim_hit_replays(results: list[dict], max_s: float) -> list[dict]:
     """Cut standalone hit replays down to their first *max_s* seconds.
 
@@ -455,6 +505,10 @@ def _trim_chance_clips(
         if seg.get("window_start_s") is not None:
             start = max(0.0, seg["window_start_s"] - pre_s)
             end = min(dur, seg.get("window_end_s", seg["window_start_s"] + 4.0) + post_s)
+            if end - start > HighlightClassifier.SC_MAX_CLIP_S:
+                # a diffuse cluster can span ~20s; keep one clip's worth around its middle
+                mid = (seg["window_start_s"] + seg.get("window_end_s", seg["window_start_s"] + 4.0)) / 2.0
+                start, end = cap_window(start, end, mid, HighlightClassifier.SC_MAX_CLIP_S)
             anchor = f"ml window {seg['window_start_s']:.1f}s"
         else:
             peak = _audio_peak_time(seg["path"])
@@ -1372,6 +1426,16 @@ def run_pipeline(
     # ── Step 4f.5: Rescue high-confidence demoted goals as scoring chances ───
     logger.info("━━━  Step 4f.5: Rescuing demoted goals as scoring chances  ━━━")
     results = _rescue_demoted_goals(results)
+
+    # ── Step 4f.5b: Cut scoring chances around the shot the HUD counted ──────
+    logger.info("━━━  Step 4f.5b: Anchoring chances on detected shots  ━━━")
+    results = _anchor_chances_on_shots(
+        results,
+        pre_s=_CFG["pipeline"]["shot_anchor_pre_s"],
+        post_s=_CFG["pipeline"]["shot_anchor_post_s"],
+        max_len_s=_CFG["pipeline"]["shot_anchor_max_clip_s"],
+        ignore_before_s=_CFG["pipeline"]["shot_anchor_ignore_before_s"],
+    )
 
     # ── Step 4f.6: Trim scoring chances + inferred goals to the action ───────
     logger.info("━━━  Step 4f.6: Trimming chance/inferred clips to audio peak  ━━━")

@@ -13,10 +13,43 @@ import logging
 import re
 import tempfile
 
+from .clip_windows import merge_windows
+
 logger = logging.getLogger(__name__)
 
 # Default intro/outro duration in seconds
 FADE_DURATION = 0.5
+
+
+def _scoring_chance_leads(seg: dict, sc_min_confidence: float) -> list[dict]:
+    """The clips to emit for one scoring-chance scene: the scene's own trim plus any
+    extra windows, with overlapping windows folded together so the same footage is
+    never played twice. (A reel once showed the last 14s of a period twice: the
+    classifier split one run of play into two clusters whose padded windows overlapped
+    and nothing de-duplicated them.) Whatever produced the windows — the classifier
+    or the shot anchor — this is the last line of defence.
+    """
+    extras = [w for w in (seg.get("sc_extra_windows") or [])
+              if w.get("confidence", 0.0) >= sc_min_confidence]
+    if not extras:
+        return [seg]
+    if "trim_start_s" not in seg or "trim_end_s" not in seg:
+        # The scene's own clip is untrimmed, i.e. it already plays everything.
+        return [seg]
+    windows = [{
+        "trim_start_s": seg["trim_start_s"], "trim_end_s": seg["trim_end_s"],
+        "confidence": seg.get("confidence", 0.0), "primary": True,
+    }] + [dict(w, primary=False) for w in extras]
+    leads: list[dict] = []
+    for m in merge_windows(windows, gap_s=1.0):
+        lead = dict(seg)
+        lead["trim_start_s"] = m["trim_start_s"]
+        lead["trim_end_s"] = m["trim_end_s"]
+        if not m["primary"]:
+            lead["confidence"] = m["confidence"]
+        lead.pop("sc_extra_windows", None)
+        leads.append(lead)
+    return leads
 
 # Hard cap on the final reel length. YouTube (and sanity) will reject absurdly
 # long uploads, so we trim the output as a last-resort safety net regardless of
@@ -139,16 +172,7 @@ def build_reel(
             # any further time-clusters in `sc_extra_windows`; emit each as its
             # own clip in chronological order, with the chained replay (if any)
             # following the last one.
-            leads = [seg]
-            for w in seg.get("sc_extra_windows") or []:
-                if w.get("confidence", 0.0) < sc_min_confidence:
-                    continue
-                extra_lead = dict(seg)
-                extra_lead["trim_start_s"] = w["trim_start_s"]
-                extra_lead["trim_end_s"]   = w["trim_end_s"]
-                extra_lead["confidence"]   = w.get("confidence", seg.get("confidence", 0.0))
-                extra_lead.pop("sc_extra_windows", None)
-                leads.append(extra_lead)
+            leads = _scoring_chance_leads(seg, sc_min_confidence)
 
             for k, lead in enumerate(leads):
                 is_last = (k == len(leads) - 1)
@@ -831,7 +855,7 @@ def _write_reel_timeline(
 
     json_path = output_path.parent / f"{output_path.stem}.timeline.json"
     json_path.write_text(json.dumps({"reel": output_path.name, "total_s": round(cursor, 2),
-                                     "segments": rows}, indent=2))
+                                     "segments": rows}, indent=2), encoding="utf-8")
 
     lines = [
         f"Timeline for {output_path.name}",
@@ -852,7 +876,8 @@ def _write_reel_timeline(
             f"{r['start_tc']:>7}  {r['end_tc']:>7}  {r['duration_s']:>5.1f}s  {per:>3}  {desc}{src}"
         )
     txt_path = output_path.parent / f"{output_path.stem}.timeline.txt"
-    txt_path.write_text("\n".join(lines) + "\n")
+    # explicit UTF-8: the text holds "→" / "–", which Windows' default cp1252 can't encode
+    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info("Reel timeline → %s", txt_path)
 
 

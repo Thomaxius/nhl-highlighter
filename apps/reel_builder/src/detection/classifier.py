@@ -11,6 +11,8 @@ import logging
 import torch
 import numpy as np
 
+from ..assembly.clip_windows import cap_window, merge_windows
+
 logger = logging.getLogger(__name__)
 
 # Labels must match the order used during training.
@@ -64,6 +66,17 @@ class HighlightClassifier:
     SC_PRE_S           = 7.0    # scoring-chance lead-in kept before the peak
     SC_POST_S          = 5.0    # …and tail kept after it (a shot / save often lands
                                  # just past the last confidently-classified window)
+    # A diffuse scene (many mediocre windows, no sharp peak) used to chain into one
+    # ~20s cluster and, with the lead-in/tail above, a ~25s clip — a real reel kept
+    # 25.1s of a 26.1s scene for a single weak shot. Cap any one clip at the size of a
+    # lone peak window plus its lead-in/tail (4+7+5), centred on the strongest window,
+    # so a genuine single peak is untouched and only the diffuse cases shrink.
+    SC_MAX_CLIP_S      = 16.0
+    # An EXTRA clip from the same scene must contain at least one genuinely strong
+    # window. Weak extras (50-51% in the reel that prompted this) were the same
+    # mediocre run split in two by PEAK_MAX_CLUSTER_S.
+    SC_EXTRA_MIN_PEAK_CONF = 0.60
+    SC_MERGE_GAP_S     = 1.0    # clips this close (or overlapping) become one, never repeat footage
 
     def classify_segment(self, video_path: str | Path) -> dict:
         """
@@ -206,20 +219,39 @@ class HighlightClassifier:
                 and max(clusters[-1]["end_s"], w["window_end_s"]) - clusters[-1]["start_s"]
                     <= self.PEAK_MAX_CLUSTER_S
             ):
-                clusters[-1]["end_s"]      = max(clusters[-1]["end_s"], w["window_end_s"])
-                clusters[-1]["confidence"] = max(clusters[-1]["confidence"], w["confidence"])
+                c = clusters[-1]
+                c["end_s"] = max(c["end_s"], w["window_end_s"])
+                if w["confidence"] > c["confidence"]:   # strict: ties keep the EARLIER window
+                    c["confidence"]   = w["confidence"]
+                    c["peak_start_s"] = w["window_start_s"]
+                    c["peak_end_s"]   = w["window_end_s"]
             else:
                 clusters.append({
                     "start_s": w["window_start_s"],
                     "end_s": w["window_end_s"],
                     "confidence": w["confidence"],
+                    "peak_start_s": w["window_start_s"],   # the strongest window in the cluster
+                    "peak_end_s": w["window_end_s"],
                 })
         if not clusters:  # best window itself failed the gate (margin only) — use it
             clusters = [{
                 "start_s": best["window_start_s"],
                 "end_s": best["window_end_s"],
                 "confidence": best["confidence"],
+                "peak_start_s": best["window_start_s"],
+                "peak_end_s": best["window_end_s"],
             }]
+
+        def clip_window(c: dict) -> tuple[float, float]:
+            """A cluster's padded clip window, capped at SC_MAX_CLIP_S around its
+            strongest window so a diffuse cluster can't grow into a whole scene."""
+            start = max(0.0, c["start_s"] - self.SC_PRE_S)
+            end   = min(duration_s, c["end_s"] + self.SC_POST_S)
+            if end - start > self.SC_MAX_CLIP_S:
+                start, end = cap_window(
+                    start, end, (c["peak_start_s"] + c["peak_end_s"]) / 2.0, self.SC_MAX_CLIP_S,
+                )
+            return start, end
 
         # A scoring chance is anchored on its FIRST peak (the shot that started
         # it); other labels keep the highest-confidence cluster.
@@ -242,25 +274,45 @@ class HighlightClassifier:
         # stays a genuine banner-confirmed goal or gets dropped as 'other' —
         # the reel builder only reads this key off a segment whose final label
         # is scoring_chance.
-        if extra:
-            winner["sc_extra_windows"] = [
-                {
-                    "trim_start_s": max(0.0, c["start_s"] - self.SC_PRE_S),
-                    "trim_end_s":   min(duration_s, c["end_s"] + self.SC_POST_S),
-                    "confidence":   c["confidence"],
-                }
-                for c in extra[: self.PEAK_MAX_EXTRA]
-            ]
+        # Only extras with a genuinely strong window earn their own clip.
+        strong_extra = [c for c in extra if c["confidence"] >= self.SC_EXTRA_MIN_PEAK_CONF]
+        extra_wins = []
+        for c in strong_extra[: self.PEAK_MAX_EXTRA]:
+            start, end = clip_window(c)
+            extra_wins.append({"trim_start_s": start, "trim_end_s": end, "confidence": c["confidence"]})
 
         if winner["label"] == "scoring_chance":
-            winner["trim_start_s"] = max(0.0, primary["start_s"] - self.SC_PRE_S)
-            winner["trim_end_s"]   = min(duration_s, primary["end_s"] + self.SC_POST_S)
+            start, end = clip_window(primary)
+            # One run of play that the 20s cluster cap split in two produces windows whose
+            # lead-in/tail padding overlap — folding them together stops the same footage
+            # (once the end of a period shown twice, 14s of a 16s clip) playing twice.
+            merged = merge_windows(
+                [{"trim_start_s": start, "trim_end_s": end, "confidence": primary["confidence"], "primary": True}]
+                + extra_wins,
+                gap_s=self.SC_MERGE_GAP_S,
+            )
+            prim = next(m for m in merged if m["primary"])
+            winner["trim_start_s"] = prim["trim_start_s"]
+            winner["trim_end_s"]   = prim["trim_end_s"]
+            extra_wins = [
+                {k: m[k] for k in ("trim_start_s", "trim_end_s", "confidence")}
+                for m in merged if not m["primary"]
+            ]
+        else:
+            # The headline label isn't scoring_chance (a demoted goal, say), so the primary's
+            # trim is decided later (Step 4f.6) — still make sure the extras can't repeat each other.
+            extra_wins = [
+                {k: m[k] for k in ("trim_start_s", "trim_end_s", "confidence")}
+                for m in merge_windows(extra_wins, gap_s=self.SC_MERGE_GAP_S)
+            ]
+        if extra_wins:
+            winner["sc_extra_windows"] = extra_wins
 
         logger.debug(
             "  Windowed inference: %s → %s (%.0f%%) over %.1fs  [%d peak(s), window %.1f-%.1fs%s]",
             video_path.name, winner["label"], winner["confidence"] * 100, duration_s, len(clusters),
             winner["window_start_s"], winner["window_end_s"],
-            f", +{len(winner['sc_extra_windows'])} extra" if extra else "",
+            f", +{len(winner['sc_extra_windows'])} extra" if winner.get("sc_extra_windows") else "",
         )
         return winner
 

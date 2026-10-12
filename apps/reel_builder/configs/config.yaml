@@ -7,6 +7,10 @@ pipeline:
   sc_shot_floor: 0.20       # min existing scoring_chance confidence for a detected SOG shot to corroborate it (Step 4e)
   sc_shot_boosted_confidence: 0.70  # confidence a shot-corroborated scoring_chance is boosted to (Step 4e)
   hit_replay_min_confidence: 0.50   # a hit_replay prediction below this falls back to other_replay
+  shot_anchor_pre_s: 5.0            # seconds kept before a detected shot when a chance is cut around it (Step 4f.5b)
+  shot_anchor_post_s: 3.0           # ...and after it
+  shot_anchor_max_clip_s: 20.0      # shots closer than this fold into one clip; farther apart get their own
+  shot_anchor_ignore_before_s: 1.0  # a shot "at ~0s" is the scoreboard catching up from the previous scene, not a real position
   max_hit_replays: 4        # max standalone hit_replay clips in the reel (lowest priority, fills spare room only)
   hit_replay_max_s: 10.0    # standalone hit replays longer than this are cut to their first N seconds
   add_overlays: true

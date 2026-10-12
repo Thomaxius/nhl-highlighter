@@ -408,6 +408,9 @@ class ScoreDetector:
             seg["sog_away"] = result["sog_away"]
             seg["score_changed"] = result["score_changed"]
             seg["sog_changed"] = result["sog_changed"]
+            # Seconds into this scene at which each shot was counted (refined to ~0.5s).
+            # Used by Step 4f.5b to cut a chance around the actual shot.
+            seg["shot_times_s"] = [round(t, 2) for t in (result.get("shot_timestamps") or [])]
 
             if result["hud_visible"]:
                 hud_visible_count += 1
